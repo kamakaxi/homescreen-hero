@@ -1,6 +1,6 @@
 from datetime import date, datetime
-from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DateRange(BaseModel):
@@ -65,9 +65,9 @@ class RotationSettings(BaseModel):
         ge=1,
         description="Global cap on how many collections are featured at once",
     )
-    strategy: str = Field(
-        default="random",
-        description="Selection strategy: 'random' (random selection), 'weighted' (sort groups by weight), or 'lru' (pick least recently used collections)",
+    group_order: str = Field(
+        default="display_order",
+        description="How groups are ordered for processing: 'display_order', 'weighted', or 'random'",
     )
     allow_repeats: bool = Field(
         default=False,
@@ -85,14 +85,78 @@ class RotationSettings(BaseModel):
         default_factory=AutoRotateSettings,
         description="Settings for auto-rotate mode",
     )
-    randomize_group_order: bool = Field(
-        default=False,
-        description="Shuffle the processing order of groups each rotation instead of using display_order or weight",
-    )
     per_library_limits: Dict[str, int] = Field(
         default_factory=dict,
         description="Maximum collections per library during rotation. Keys are library names, values are max counts.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_strategy(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        # If new field already exists, clean up legacy/deprecated fields and skip migration
+        if "group_order" in data:
+            data.pop("strategy", None)
+            data.pop("randomize_group_order", None)
+            data.pop("collection_selection", None)
+            return data
+
+        old_strategy = data.pop("strategy", None)
+        old_randomize = data.pop("randomize_group_order", None)
+        data.pop("collection_selection", None)
+
+        if old_strategy is not None:
+            if old_strategy == "weighted":
+                data["group_order"] = "weighted"
+            else:
+                data["group_order"] = "display_order"
+
+        if old_randomize:
+            data["group_order"] = "random"
+
+        return data
+
+
+class SmartGroupRule(BaseModel):
+    # A single filter rule for smart groups.
+    # Rules within a group are ANDed; multiple values within a rule are ORed.
+    field: Literal["label", "source", "library", "name", "sort_title", "item_count"] = Field(
+        ..., description="Which collection attribute to filter on"
+    )
+    operator: str = Field(
+        ...,
+        description=(
+            "Comparison operator. Varies by field: "
+            "label: includes/excludes; source/library: is/is_not; "
+            "name: contains/not_contains; item_count: gte/lte"
+        ),
+    )
+    values: List[Union[str, int]] = Field(
+        ..., description="Values to match against (ORed within this rule)"
+    )
+
+    model_config = ConfigDict(arbitrary_types_allowed=False)
+
+    VALID_OPERATORS: ClassVar[dict] = {
+        "label": {"includes", "excludes"},
+        "source": {"is", "is_not"},
+        "library": {"is", "is_not"},
+        "name": {"contains", "not_contains"},
+        "sort_title": {"contains", "not_contains"},
+        "item_count": {"gte", "lte"},
+    }
+
+    @model_validator(mode="after")
+    def validate_operator(self):
+        valid = self.VALID_OPERATORS.get(self.field, set())
+        if self.operator not in valid:
+            raise ValueError(
+                f"Invalid operator '{self.operator}' for field '{self.field}'. "
+                f"Valid operators: {sorted(valid)}"
+            )
+        return self
 
 
 class CollectionGroupConfig(BaseModel):
@@ -111,7 +175,7 @@ class CollectionGroupConfig(BaseModel):
     weight: int = Field(
         default=1,
         ge=1,
-        description="Relative priority of this group vs other groups (used when strategy='weighted'). Higher weight = higher priority.",
+        description="Relative priority of this group vs other groups (used when group_order='weighted'). Higher weight = higher priority.",
     )
     display_order: int = Field(
         default=0,
@@ -135,14 +199,53 @@ class CollectionGroupConfig(BaseModel):
         default=False,
         description="Promote collections to Library Recommended section",
     )
+    collection_selection: Literal["random", "lru"] = Field(
+        default="random",
+        description="How collections are picked from this group during rotation.",
+    )
+    collection_order: Optional[Literal["random", "alpha", "custom"]] = Field(
+        default=None,
+        description="Display order of picked collections on homescreen. 'custom' preserves the order defined in the collections list. None = random.",
+    )
+    collection_sort: Optional[Literal["release", "alpha"]] = Field(
+        default=None,
+        description="Sort order for items within collections in this group. None = don't change.",
+    )
     date_range: Optional[DateRange] = Field(
         default=None,
         description="Optional yearly date window when this group is active",
     )
+    smart: bool = Field(
+        default=False,
+        description="Whether this group uses smart rules instead of a manual collection list",
+    )
+    rules: List[SmartGroupRule] = Field(
+        default_factory=list,
+        description="Smart group filter rules (only used when smart=True)",
+    )
+    target_users: Optional[List[str]] = Field(
+        default=None,
+        description="Plex usernames who should see this group's collections. None = everyone.",
+    )
     collections: List[str] = Field(
         default_factory=list,
-        description="List of Plex collection names belonging to this group",
+        description="List of Plex collection names belonging to this group (ignored when smart=True)",
     )
+
+    @model_validator(mode="after")
+    def validate_smart_rules(self):
+        if self.smart and not self.rules:
+            raise ValueError("Smart groups must have at least one rule")
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_collection_selection(cls, data):
+        if not isinstance(data, dict):
+            return data
+        if data.get("collection_selection") is None:
+            data["collection_selection"] = "random"
+        return data
 
 
 class LoggingSettings(BaseModel):
@@ -189,6 +292,10 @@ class TraktSource(BaseModel):
     name: str
     url: str
     plex_library: str
+    auto_request: bool = Field(
+        default=False,
+        description="Automatically request missing items via Seerr after sync",
+    )
 
 
 class TraktSettings(BaseModel):
@@ -212,6 +319,10 @@ class LetterboxdSource(BaseModel):
     name: str = Field(..., description="Display name for this list")
     url: str = Field(..., description="Full or short Letterboxd list URL")
     plex_library: str = Field(..., description="Target Plex library name")
+    auto_request: bool = Field(
+        default=False,
+        description="Automatically request missing items via Seerr after sync",
+    )
 
 
 class LetterboxdSettings(BaseModel):
@@ -223,6 +334,10 @@ class MDBListSource(BaseModel):
     name: str = Field(..., description="Display name for this list")
     url: str = Field(..., description="MDBList URL (e.g., https://mdblist.com/lists/username/listname)")
     plex_library: str = Field(..., description="Target Plex library name")
+    auto_request: bool = Field(
+        default=False,
+        description="Automatically request missing items via Seerr after sync",
+    )
 
 
 class MDBListSettings(BaseModel):
@@ -240,6 +355,33 @@ class MDBListSettings(BaseModel):
         description="Base URL for MDBList API",
     )
     sources: List[MDBListSource] = Field(default_factory=list)
+
+
+class TMDbSource(BaseModel):
+    name: str = Field(..., description="Display name for this list (becomes Plex collection name)")
+    url: str = Field(..., description="TMDb list URL (e.g., https://www.themoviedb.org/list/123456)")
+    plex_library: str = Field(..., description="Target Plex library name")
+    auto_request: bool = Field(
+        default=False,
+        description="Automatically request missing items via Seerr after sync",
+    )
+
+
+class TMDbSettings(BaseModel):
+    # TMDb connection details.
+    enabled: bool = Field(
+        default=False,
+        description="Whether TMDb integration is enabled",
+    )
+    api_key: Optional[str] = Field(
+        default=None,
+        description="TMDb API key (can be set via HSH_TMDB_API_KEY env var)",
+    )
+    base_url: str = Field(
+        "https://api.themoviedb.org/3",
+        description="Base URL for TMDb API",
+    )
+    sources: List[TMDbSource] = Field(default_factory=list)
 
 
 class AniListSource(BaseModel):
@@ -341,6 +483,7 @@ class AppConfig(BaseModel):
     trakt: Optional[TraktSettings] = None
     letterboxd: Optional[LetterboxdSettings] = None
     mdblist: Optional[MDBListSettings] = None
+    tmdb: Optional[TMDbSettings] = None
     anilist: Optional[AniListSettings] = None
     mal: Optional[MALSettings] = None
     tautulli: Optional[TautulliSettings] = None
@@ -399,6 +542,7 @@ class RotationRecordOut(BaseModel):
     success: bool
     error_message: Optional[str] = None
     featured_collections: List[str]
+    group_contributions: Optional[Dict[str, List[str]]] = None
 
 
 class CollectionUsageOut(BaseModel):

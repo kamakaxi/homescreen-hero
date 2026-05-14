@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { fetchWithAuth } from "../utils/api";
-import { SlidersHorizontal, Check, ChevronDown, FileText, Copy, Download, Pause, Play, RefreshCw, Search, Server, CalendarSync, Ban, Archive, Upload, HardDriveDownload, HardDriveUpload, Undo2, Shield, Users } from "lucide-react";
+import { SlidersHorizontal, Check, ChevronDown, FileText, Copy, Download, Pause, Play, RefreshCw, Search, Server, CalendarSync, Ban, Archive, Upload, HardDriveDownload, HardDriveUpload, Undo2, Shield, Users, Palette, Sun, Moon, Plug } from "lucide-react";
 import { Switch, Listbox } from "@headlessui/react";
 import FieldRow from "../components/FieldRow";
 import CollapsibleFormSection from "../components/CollapsibleFormSection";
@@ -9,9 +9,13 @@ import TestConnectionCta from "../components/TestConnectionCta";
 import Toast from "../components/Toast";
 import UserRow from "../components/UserRow";
 import { useAuth } from "../utils/auth";
+import { useTheme, type ThemeAccent } from "../utils/theme";
+import { TautulliIntegration } from "../components/integrations/TautulliIntegration";
+import { SeerrIntegration } from "../components/integrations/SeerrIntegration";
 
 const tabs = [
     { id: "general", label: "General", icon: SlidersHorizontal },
+    { id: "integrations", label: "Integrations", icon: Plug },
     { id: "logs", label: "Logs", icon: FileText },
     { id: "backup", label: "Backup", icon: Archive },
 ] as const;
@@ -25,10 +29,9 @@ type RotationSettings = {
     enabled: boolean;
     interval_hours: number;
     max_collections: number;
-    strategy: string;
+    group_order: string;
     allow_repeats: boolean;
     sync_all_on_rotation: boolean;
-    randomize_group_order: boolean;
     blacklisted_collections: string[];
     per_library_limits: Record<string, number>;
 };
@@ -38,7 +41,7 @@ type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR" | "ALL";
 
 type CollectionSource = {
     name: string;
-    source: "plex" | "trakt" | "letterboxd" | "mdblist" | "anilist";
+    source: "plex" | "trakt" | "letterboxd" | "mdblist" | "tmdb" | "anilist" | "mal";
     detail?: string | null;
 };
 
@@ -47,7 +50,9 @@ type CollectionSourcesResponse = {
     trakt: CollectionSource[];
     letterboxd: CollectionSource[];
     mdblist: CollectionSource[];
+    tmdb: CollectionSource[];
     anilist: CollectionSource[];
+    mal: CollectionSource[];
 };
 
 function guessLevel(line: string): Exclude<LogLevel, "ALL"> | null {
@@ -75,6 +80,61 @@ function LevelBadge({ level }: { level: Exclude<LogLevel, "ALL"> | null }) {
         <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${cls}`}>
             {level ?? "LOG"}
         </span>
+    );
+}
+
+const ACCENT_OPTIONS: { value: ThemeAccent; label: string; swatch: string }[] = [
+    { value: "default", label: "Default", swatch: "bg-[rgb(25,93,230)]" },
+    { value: "plex-orange", label: "Plex Orange", swatch: "bg-[rgb(229,160,13)]" },
+];
+
+function AppearanceSection() {
+    const { accent, setAccent } = useTheme();
+
+    return (
+        <CollapsibleFormSection
+            title="Appearance"
+            description="Customize how the dashboard looks."
+            icon={Palette}
+        >
+            <FieldRow label="Mode" description="Light mode may come down the road.">
+                <div className="flex gap-2">
+                    <button
+                        className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition opacity-40 cursor-not-allowed bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                        disabled
+                    >
+                        <Sun className="h-4 w-4" />
+                        Light
+                    </button>
+                    <button
+                        className="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition bg-primary text-white"
+                        disabled
+                    >
+                        <Moon className="h-4 w-4" />
+                        Dark
+                    </button>
+                </div>
+            </FieldRow>
+
+            <FieldRow label="Accent" description="Choose the primary accent color used throughout the app.">
+                <div className="flex gap-3">
+                    {ACCENT_OPTIONS.map((opt) => (
+                        <button
+                            key={opt.value}
+                            onClick={() => setAccent(opt.value)}
+                            className={`flex items-center gap-2.5 rounded-lg px-4 py-2 text-sm font-medium transition border ${
+                                accent === opt.value
+                                    ? "border-primary bg-primary/10 text-slate-900 dark:text-white"
+                                    : "border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-400 dark:hover:border-slate-600"
+                            }`}
+                        >
+                            <span className={`h-4 w-4 rounded-full ${opt.swatch} ring-1 ring-black/10`} />
+                            {opt.label}
+                        </button>
+                    ))}
+                </div>
+            </FieldRow>
+        </CollapsibleFormSection>
     );
 }
 
@@ -143,10 +203,9 @@ export default function SettingsPage() {
         enabled: true,
         interval_hours: 12,
         max_collections: 5,
-        strategy: "random",
+        group_order: "display_order",
         allow_repeats: false,
         sync_all_on_rotation: true,
-        randomize_group_order: false,
         blacklisted_collections: [],
         per_library_limits: {},
     });
@@ -154,7 +213,7 @@ export default function SettingsPage() {
     const [intervalInput, setIntervalInput] = useState("12");
     const [maxCollectionsInput, setMaxCollectionsInput] = useState("5");
     const [blacklistSearch, setBlacklistSearch] = useState("");
-    const [blacklistSourceFilter, setBlacklistSourceFilter] = useState<"all" | "plex" | "trakt" | "letterboxd" | "mdblist" | "anilist">("all");
+    const [blacklistSourceFilter, setBlacklistSourceFilter] = useState<"all" | "plex" | "trakt" | "letterboxd" | "mdblist" | "tmdb" | "anilist" | "mal">("all");
     const [blacklistPage, setBlacklistPage] = useState(1);
     const [collectionSources, setCollectionSources] = useState<CollectionSource[]>([]);
     const blacklistItemsPerPage = 20;
@@ -222,6 +281,8 @@ export default function SettingsPage() {
         switch (activeTab) {
             case "general":
                 return "Control the basics without directly editing the YAML config.";
+            case "integrations":
+                return "Configure connections to Plex, Tautulli, and Seerr.";
             case "logs":
                 return "View and search application logs in real-time.";
             case "backup":
@@ -295,7 +356,9 @@ export default function SettingsPage() {
                     ...(data.trakt || []),
                     ...(data.letterboxd || []),
                     ...(data.mdblist || []),
+                    ...(data.tmdb || []),
                     ...(data.anilist || []),
+                    ...(data.mal || []),
                 ];
                 setCollectionSources(combined);
             })
@@ -617,8 +680,8 @@ export default function SettingsPage() {
             }
 
             setLines(nextLines);
-        } catch (e: any) {
-            setLogsError(e?.message ?? "Failed to load logs");
+        } catch (e: unknown) {
+            setLogsError(e instanceof Error ? e.message : "Failed to load logs");
         } finally {
             if (showLoading) setLoadingLogs(false);
         }
@@ -663,8 +726,8 @@ export default function SettingsPage() {
             a.download = "homescreen_hero.log";
             a.click();
             URL.revokeObjectURL(url);
-        } catch (e: any) {
-            setLogsError(e?.message ?? "Failed to download logs");
+        } catch (e: unknown) {
+            setLogsError(e instanceof Error ? e.message : "Failed to download logs");
         }
     }
 
@@ -685,8 +748,8 @@ export default function SettingsPage() {
             a.click();
             URL.revokeObjectURL(url);
             setBackupToast({ message: "Configuration exported successfully.", type: "success" });
-        } catch (e: any) {
-            setBackupToast({ message: e?.message ?? "Failed to export configuration.", type: "error" });
+        } catch (e: unknown) {
+            setBackupToast({ message: e instanceof Error ? e.message : "Failed to export configuration.", type: "error" });
         } finally {
             setExporting(false);
         }
@@ -710,8 +773,8 @@ export default function SettingsPage() {
             } else {
                 setValidationResult({ ok: true, message: data.message });
             }
-        } catch (e: any) {
-            setBackupToast({ message: e?.message ?? "Validation request failed.", type: "error" });
+        } catch (e: unknown) {
+            setBackupToast({ message: e instanceof Error ? e.message : "Validation request failed.", type: "error" });
         } finally {
             setValidating(false);
         }
@@ -736,8 +799,8 @@ export default function SettingsPage() {
             setSelectedFile(null);
             setValidationResult(null);
             if (fileInputRef.current) fileInputRef.current.value = "";
-        } catch (e: any) {
-            setBackupToast({ message: e?.message ?? "Failed to import configuration.", type: "error" });
+        } catch (e: unknown) {
+            setBackupToast({ message: e instanceof Error ? e.message : "Failed to import configuration.", type: "error" });
         } finally {
             setImporting(false);
         }
@@ -766,8 +829,8 @@ export default function SettingsPage() {
             }
             setBackupToast({ message: data.message, type: "success" });
             fetchBackupStatus();
-        } catch (e: any) {
-            setBackupToast({ message: e?.message ?? "Failed to revert configuration.", type: "error" });
+        } catch (e: unknown) {
+            setBackupToast({ message: e instanceof Error ? e.message : "Failed to revert configuration.", type: "error" });
         } finally {
             setReverting(false);
         }
@@ -836,6 +899,557 @@ export default function SettingsPage() {
 
             {activeTab === "general" ? (
                 <>
+                    <AppearanceSection />
+
+                    <div ref={authSectionRef}>
+                    <CollapsibleFormSection
+                        title="Authentication"
+                        description="Control how users sign in to the dashboard."
+                        icon={Shield}
+                        defaultExpanded={authExpanded}
+                    >
+                        <FieldRow label="Login Methods" hint="Choose which authentication methods are available on the login page.">
+                            <Listbox
+                                value={authMethod}
+                                onChange={(val) => setAuthMethod(val)}
+                                disabled={loadingAuth}
+                            >
+                                <div className="relative">
+                                    <Listbox.Button className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70 text-left flex items-center justify-between data-[disabled]:opacity-50">
+                                        <span>
+                                            {authMethod === "password" ? "Password Only" :
+                                             authMethod === "plex" ? "Plex Only" :
+                                             "Password + Plex"}
+                                        </span>
+                                        <ChevronDown size={16} className="text-slate-400" />
+                                    </Listbox.Button>
+
+                                    <Listbox.Options className="absolute z-10 mt-1 w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg shadow-lg overflow-hidden focus:outline-none">
+                                        <Listbox.Option
+                                            value="password"
+                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
+                                        >
+                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
+                                                <div>
+                                                    <span className="data-[selected]:font-medium">Password Only</span>
+                                                    <p className="text-xs text-slate-500">Admin signs in with a local username and password. No multi-user support.</p>
+                                                </div>
+                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
+                                            </div>
+                                        </Listbox.Option>
+                                        <Listbox.Option
+                                            value="plex"
+                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
+                                        >
+                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
+                                                <div>
+                                                    <span className="data-[selected]:font-medium">Plex Only</span>
+                                                    <p className="text-xs text-slate-500">All users sign in with their Plex account. Server owner is admin.</p>
+                                                </div>
+                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
+                                            </div>
+                                        </Listbox.Option>
+                                        <Listbox.Option
+                                            value="both"
+                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
+                                        >
+                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
+                                                <div>
+                                                    <span className="data-[selected]:font-medium">Password + Plex</span>
+                                                    <p className="text-xs text-slate-500">Admin can use password or Plex. Shared users sign in with Plex.</p>
+                                                </div>
+                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
+                                            </div>
+                                        </Listbox.Option>
+                                    </Listbox.Options>
+                                </div>
+                            </Listbox>
+                        </FieldRow>
+
+                        {/* Auto-approve toggle */}
+                        <div className={authMethod === "password" ? "opacity-40 pointer-events-none" : ""}>
+                            <FieldRow label="Auto-approve Users" hint="When off, new Plex users must be approved by an admin before they can sign in.">
+                                <Switch
+                                    checked={autoApproveUsers}
+                                    onChange={setAutoApproveUsers}
+                                    disabled={authMethod === "password"}
+                                    className="group relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
+                                >
+                                    <span className="inline-block h-5 w-5 transform rounded-full bg-white transition group-data-[checked]:translate-x-5 translate-x-1" />
+                                </Switch>
+                            </FieldRow>
+                        </div>
+
+                        {/* Save Button */}
+                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-700/50">
+                            <div className="flex-1">
+                                {authMessage && (
+                                    <p className="text-xs text-emerald-400">{authMessage}</p>
+                                )}
+                                {authError && (
+                                    <p className="text-xs text-rose-400">{authError}</p>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={saveAuthSettings}
+                                disabled={savingAuth || loadingAuth}
+                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {savingAuth ? (
+                                    <>
+                                        <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                        Saving...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Check className="h-4 w-4" />
+                                        Save Settings
+                                    </>
+                                )}
+                            </button>
+                        </div>
+
+                        {/* User list */}
+                        <div className={`mt-4 pt-4 border-t border-slate-700/50 ${authMethod === "password" ? "opacity-40 pointer-events-none" : ""}`}>
+                            <div className="flex items-center justify-between mb-3">
+                                <div className="flex items-center gap-2">
+                                    <Users size={15} className="text-slate-400" />
+                                    <h4 className="text-sm font-semibold text-slate-200">Users</h4>
+                                    {users.filter(u => u.status === "pending").length > 0 && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 font-medium">
+                                            {users.filter(u => u.status === "pending").length} pending
+                                        </span>
+                                    )}
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={fetchUsers}
+                                    disabled={loadingUsers || authMethod === "password"}
+                                    className="text-xs text-primary hover:text-primary/80 transition disabled:opacity-50"
+                                >
+                                    {loadingUsers ? "Loading..." : "Refresh"}
+                                </button>
+                            </div>
+
+                            {authMethod === "password" ? (
+                                <p className="text-xs text-slate-500 py-3 text-center">Enable Plex authentication to manage users.</p>
+                            ) : loadingUsers && users.length === 0 ? (
+                                <p className="text-xs text-slate-500 py-3 text-center">Loading users...</p>
+                            ) : users.length === 0 ? (
+                                <p className="text-xs text-slate-500 py-3 text-center">No Plex users have signed in yet.</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {users.map((u) => (
+                                        <UserRow
+                                            key={u.id}
+                                            user={u}
+                                            currentUsername={currentUsername}
+                                            onUpdate={fetchUsers}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </CollapsibleFormSection>
+                    </div>
+
+                    <CollapsibleFormSection
+                        title="Rotation Settings"
+                        description="Configure how often the scheduler rotates featured collections."
+                        icon={CalendarSync}
+                        defaultExpanded={rotationExpanded}
+                    >
+                        <FieldRow label="Automatic rotations">
+                            <div className="flex items-center justify-between rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 px-3 py-2">
+                                <div>
+                                    <p className="text-sm font-semibold text-slate-900 dark:text-white">Enable scheduler</p>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">When enabled, rotations run on the configured interval.</p>
+                                </div>
+                                <Switch
+                                    checked={rotationSettings.enabled}
+                                    onChange={() => {
+                                        if (loadingRotation) return;
+                                        setRotationSettings((prev) => ({ ...prev, enabled: !prev.enabled }));
+                                    }}
+                                    className="relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
+                                >
+                                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${rotationSettings.enabled ? 'translate-x-5' : 'translate-x-1'}`} />
+                                </Switch>
+                            </div>
+                        </FieldRow>
+
+                        <FieldRow label="Interval (hours)" hint="How often to rotate featured collections.">
+                            <input
+                                type="number"
+                                min={1}
+                                value={intervalInput}
+                                onChange={(e) => handleIntervalChange(e.target.value)}
+                                disabled={loadingRotation}
+                                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70"
+                            />
+                        </FieldRow>
+
+                        <FieldRow label="Max collections" hint="Global cap on how many collections appear at once.">
+                            <input
+                                type="number"
+                                min={1}
+                                value={maxCollectionsInput}
+                                onChange={(e) => handleMaxCollectionsChange(e.target.value)}
+                                disabled={loadingRotation}
+                                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70"
+                            />
+                        </FieldRow>
+
+                        {enabledLibraries.length >= 2 && (
+                            <FieldRow label="Per-library limits" hint="Optionally limit how many collections can come from each library. Leave empty for no limit.">
+                                <div className="space-y-2">
+                                    {enabledLibraries.map((lib) => (
+                                        <div key={lib.name} className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2">
+                                            <span className="text-sm text-slate-200 flex-1">{lib.name}</span>
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs text-slate-400">Max:</span>
+                                                <input
+                                                    type="number"
+                                                    min={0}
+                                                    placeholder="∞"
+                                                    value={rotationSettings.per_library_limits[lib.name] ?? ""}
+                                                    onChange={(e) => handleLibraryLimitChange(lib.name, e.target.value)}
+                                                    disabled={loadingRotation}
+                                                    className="w-16 rounded-lg border border-slate-600 bg-slate-800 px-2 py-1 text-sm text-slate-100 text-center focus:outline-none focus:ring-2 focus:ring-primary/70 placeholder-slate-500 focus:placeholder-transparent"
+                                                />
+                                            </div>
+                                        </div>
+                                    ))}
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        These limits work alongside the global max. For example: global max=12, Movies max=6, TV max=6 means at most 6 from each library, up to 12 total.
+                                    </p>
+                                </div>
+                            </FieldRow>
+                        )}
+
+                        <FieldRow label="Group Order" hint="How groups are ordered for processing during rotation.">
+                            <Listbox
+                                value={rotationSettings.group_order}
+                                onChange={(val) =>
+                                    setRotationSettings((prev) => ({
+                                        ...prev,
+                                        group_order: val,
+                                    }))
+                                }
+                                disabled={loadingRotation}
+                            >
+                                <div className="relative">
+                                    <Listbox.Button className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70 text-left flex items-center justify-between data-[disabled]:opacity-50">
+                                        <span>
+                                            {rotationSettings.group_order === "weighted" ? "Weighted" :
+                                             rotationSettings.group_order === "random" ? "Random" :
+                                             "Display Order"}
+                                        </span>
+                                        <ChevronDown size={16} className="text-slate-400" />
+                                    </Listbox.Button>
+
+                                    <Listbox.Options className="absolute z-10 mt-1 w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg shadow-lg overflow-hidden focus:outline-none">
+                                        <Listbox.Option
+                                            value="display_order"
+                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
+                                        >
+                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
+                                                <span className="data-[selected]:font-medium">Display Order</span>
+                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
+                                            </div>
+                                        </Listbox.Option>
+                                        <Listbox.Option
+                                            value="weighted"
+                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
+                                        >
+                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
+                                                <span className="data-[selected]:font-medium">Weighted</span>
+                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
+                                            </div>
+                                        </Listbox.Option>
+                                        <Listbox.Option
+                                            value="random"
+                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
+                                        >
+                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
+                                                <span className="data-[selected]:font-medium">Random</span>
+                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
+                                            </div>
+                                        </Listbox.Option>
+                                    </Listbox.Options>
+                                </div>
+                            </Listbox>
+                        </FieldRow>
+                        <FieldRow label="Allow repeats" hint="Permit the same collection to appear in consecutive rotations.">
+                            <Switch
+                                checked={rotationSettings.allow_repeats}
+                                onChange={() => {
+                                    if (loadingRotation) return;
+                                    setRotationSettings((prev) => ({
+                                        ...prev,
+                                        allow_repeats: !prev.allow_repeats,
+                                    }));
+                                }}
+                                className="relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
+                            >
+                                <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${rotationSettings.allow_repeats ? 'translate-x-5' : 'translate-x-1'}`} />
+                            </Switch>
+                        </FieldRow>
+
+                        <FieldRow label="Sync all lists on rotation" hint="When enabled, all third-party lists sync on every rotation. When disabled, only selected collections sync.">
+                            <Switch
+                                checked={rotationSettings.sync_all_on_rotation}
+                                onChange={() => {
+                                    if (loadingRotation) return;
+                                    setRotationSettings((prev) => ({
+                                        ...prev,
+                                        sync_all_on_rotation: !prev.sync_all_on_rotation,
+                                    }));
+                                }}
+                                className="relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
+                            >
+                                <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${rotationSettings.sync_all_on_rotation ? 'translate-x-5' : 'translate-x-1'}`} />
+                            </Switch>
+                        </FieldRow>
+
+                        {/* Save Button */}
+                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-700/50">
+                            <div className="flex-1">
+                                {rotationMessage && (
+                                    <p className="text-xs text-emerald-400">{rotationMessage}</p>
+                                )}
+                                {rotationError && (
+                                    <p className="text-xs text-rose-400">{rotationError}</p>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={saveRotationSettings}
+                                disabled={savingRotation || loadingRotation}
+                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {savingRotation ? (
+                                    <>
+                                        <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                        Saving...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Check className="h-4 w-4" />
+                                        Save Settings
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    </CollapsibleFormSection>
+
+                    {/* Collection Blacklist */}
+                    <CollapsibleFormSection
+                        title="Collection Blacklist"
+                        description="Collections that will never be selected during rotation, regardless of which groups they belong to."
+                        icon={Ban}
+                    >
+                        {/* Currently Blacklisted */}
+                        <div className="space-y-2">
+                            <label className="block text-xs font-medium text-red-400 uppercase tracking-wider">
+                                Currently Blacklisted
+                            </label>
+                            {rotationSettings.blacklisted_collections.length > 0 ? (
+                                <div className="flex flex-wrap gap-2">
+                                    {rotationSettings.blacklisted_collections.map((collection) => (
+                                        <button
+                                            key={collection}
+                                            type="button"
+                                            onClick={() => removeFromBlacklist(collection)}
+                                            disabled={loadingRotation}
+                                            className="group inline-flex items-center gap-2 rounded-full border border-red-800/60 bg-red-900/30 px-3 py-1.5 text-xs font-semibold text-red-100 hover:border-red-600 hover:bg-red-900/50 transition-all disabled:opacity-50"
+                                        >
+                                            {collection}
+                                            <span className="text-red-400 group-hover:text-red-200">×</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/20 p-3 text-center">
+                                    <p className="text-xs text-slate-500">No collections blacklisted yet.</p>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Search and Filter */}
+                        <div className="space-y-3 pt-4 border-t border-slate-700/50">
+                            <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider">
+                                Add to Blacklist
+                            </label>
+                            <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                <input
+                                    type="text"
+                                    value={blacklistSearch}
+                                    onChange={(e) => setBlacklistSearch(e.target.value)}
+                                    placeholder="Search collections..."
+                                    className="w-full pl-10 pr-4 py-2 bg-slate-800/60 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-red-500/50"
+                                />
+                            </div>
+                            <div className="flex gap-2 flex-wrap">
+                                {(["all", "plex", "trakt", "letterboxd", "mdblist", "tmdb", "anilist", "mal"] as const).map((filter) => (
+                                    <button
+                                        key={filter}
+                                        type="button"
+                                        onClick={() => setBlacklistSourceFilter(filter)}
+                                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${
+                                            blacklistSourceFilter === filter
+                                                ? filter === "all"
+                                                    ? "bg-red-600 text-white"
+                                                    : "text-white"
+                                                : "bg-slate-800/60 text-slate-300 hover:bg-slate-700"
+                                        }`}
+                                        style={
+                                            blacklistSourceFilter === filter && filter !== "all"
+                                                ? {
+                                                      backgroundColor:
+                                                          filter === "plex"
+                                                              ? "#b8860b"
+                                                              : filter === "trakt"
+                                                              ? "#8b2e82"
+                                                              : filter === "letterboxd"
+                                                              ? "#00a63d"
+                                                              : filter === "anilist"
+                                                              ? "#2b7de9"
+                                                              : "#4284c9",
+                                                  }
+                                                : undefined
+                                        }
+                                    >
+                                        {filter === "anilist" ? "AniList" : filter.charAt(0).toUpperCase() + filter.slice(1)}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Collection Grid */}
+                        <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 mt-4">
+                            {paginatedBlacklistSources.map((source) => (
+                                <button
+                                    key={`${source.source}-${source.name}`}
+                                    type="button"
+                                    onClick={() => addToBlacklist(source.name)}
+                                    className="flex flex-col gap-1 rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5 text-left text-sm text-slate-100 transition-all duration-200 hover:border-red-500/40 hover:bg-red-900/20"
+                                >
+                                    <div className="flex items-start justify-between gap-2">
+                                        <p className="font-semibold text-xs leading-tight flex-1 line-clamp-1">{source.name}</p>
+                                        <span
+                                            className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold flex-shrink-0 text-white"
+                                            style={{
+                                                backgroundColor:
+                                                    source.source === "plex" ? "#e5a00d"
+                                                        : source.source === "trakt" ? "#af35a3"
+                                                        : source.source === "letterboxd" ? "#00a63d"
+                                                        : source.source === "tmdb" ? "#01b4e4"
+                                                        : source.source === "anilist" ? "#2b2d42"
+                                                        : source.source === "mal" ? "#2e51a2"
+                                                        : "#4284c9",
+                                            }}
+                                        >
+                                            {source.source.charAt(0).toUpperCase() + source.source.slice(1)}
+                                        </span>
+                                    </div>
+                                    {source.detail && (
+                                        <p className="text-[10px] text-slate-500 line-clamp-1">{source.detail}</p>
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+
+                        {availableBlacklistSources.length === 0 && (
+                            <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/20 p-3 text-center mt-4">
+                                <p className="text-xs text-slate-500">
+                                    {collectionSources.length === 0
+                                        ? "No collections found. Configure Plex or integrations first."
+                                        : "No matching collections found."}
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Pagination */}
+                        {blacklistTotalPages > 1 && (
+                            <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-800/60">
+                                <p className="text-xs text-slate-400">
+                                    Showing {((blacklistPage - 1) * blacklistItemsPerPage) + 1}-{Math.min(blacklistPage * blacklistItemsPerPage, availableBlacklistSources.length)} of {availableBlacklistSources.length}
+                                </p>
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setBlacklistPage((p) => Math.max(1, p - 1))}
+                                        disabled={blacklistPage === 1}
+                                        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800/60 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                    >
+                                        Previous
+                                    </button>
+                                    <div className="flex items-center gap-1">
+                                        {Array.from({ length: blacklistTotalPages }, (_, i) => i + 1).map((page) => (
+                                            <button
+                                                key={page}
+                                                type="button"
+                                                onClick={() => setBlacklistPage(page)}
+                                                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${
+                                                    blacklistPage === page
+                                                        ? "bg-red-600 text-white"
+                                                        : "bg-slate-800/60 text-slate-300 hover:bg-slate-700"
+                                                }`}
+                                            >
+                                                {page}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setBlacklistPage((p) => Math.min(blacklistTotalPages, p + 1))}
+                                        disabled={blacklistPage === blacklistTotalPages}
+                                        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800/60 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                    >
+                                        Next
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Save Button */}
+                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-700/50">
+                            <div className="flex-1">
+                                {rotationMessage && (
+                                    <p className="text-xs text-emerald-400">{rotationMessage}</p>
+                                )}
+                                {rotationError && (
+                                    <p className="text-xs text-rose-400">{rotationError}</p>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={saveRotationSettings}
+                                disabled={savingRotation || loadingRotation}
+                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {savingRotation ? (
+                                    <>
+                                        <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                        Saving...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Check className="h-4 w-4" />
+                                        Save Blacklist
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    </CollapsibleFormSection>
+                </>
+            ) : null}
+
+            {activeTab === "integrations" ? (
+                <div className="space-y-6">
                     <CollapsibleFormSection
                         title="Plex"
                         description="Provide credentials for the media server this dashboard references."
@@ -978,552 +1592,9 @@ export default function SettingsPage() {
                         />
                     </CollapsibleFormSection>
 
-                    <div ref={authSectionRef}>
-                    <CollapsibleFormSection
-                        title="Authentication"
-                        description="Control how users sign in to the dashboard."
-                        icon={Shield}
-                        defaultExpanded={authExpanded}
-                    >
-                        <FieldRow label="Login Methods" hint="Choose which authentication methods are available on the login page.">
-                            <Listbox
-                                value={authMethod}
-                                onChange={(val) => setAuthMethod(val)}
-                                disabled={loadingAuth}
-                            >
-                                <div className="relative">
-                                    <Listbox.Button className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70 text-left flex items-center justify-between data-[disabled]:opacity-50">
-                                        <span>
-                                            {authMethod === "password" ? "Password Only" :
-                                             authMethod === "plex" ? "Plex Only" :
-                                             "Password + Plex"}
-                                        </span>
-                                        <ChevronDown size={16} className="text-slate-400" />
-                                    </Listbox.Button>
-
-                                    <Listbox.Options className="absolute z-10 mt-1 w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg shadow-lg overflow-hidden focus:outline-none">
-                                        <Listbox.Option
-                                            value="password"
-                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
-                                        >
-                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
-                                                <div>
-                                                    <span className="data-[selected]:font-medium">Password Only</span>
-                                                    <p className="text-xs text-slate-500">Admin signs in with a local username and password. No multi-user support.</p>
-                                                </div>
-                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
-                                            </div>
-                                        </Listbox.Option>
-                                        <Listbox.Option
-                                            value="plex"
-                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
-                                        >
-                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
-                                                <div>
-                                                    <span className="data-[selected]:font-medium">Plex Only</span>
-                                                    <p className="text-xs text-slate-500">All users sign in with their Plex account. Server owner is admin.</p>
-                                                </div>
-                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
-                                            </div>
-                                        </Listbox.Option>
-                                        <Listbox.Option
-                                            value="both"
-                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
-                                        >
-                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
-                                                <div>
-                                                    <span className="data-[selected]:font-medium">Password + Plex</span>
-                                                    <p className="text-xs text-slate-500">Admin can use password or Plex. Shared users sign in with Plex.</p>
-                                                </div>
-                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
-                                            </div>
-                                        </Listbox.Option>
-                                    </Listbox.Options>
-                                </div>
-                            </Listbox>
-                        </FieldRow>
-
-                        {/* Auto-approve toggle */}
-                        <div className={authMethod === "password" ? "opacity-40 pointer-events-none" : ""}>
-                            <FieldRow label="Auto-approve Users" hint="When off, new Plex users must be approved by an admin before they can sign in.">
-                                <Switch
-                                    checked={autoApproveUsers}
-                                    onChange={setAutoApproveUsers}
-                                    disabled={authMethod === "password"}
-                                    className="group relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
-                                >
-                                    <span className="inline-block h-5 w-5 transform rounded-full bg-white transition group-data-[checked]:translate-x-5 translate-x-1" />
-                                </Switch>
-                            </FieldRow>
-                        </div>
-
-                        {/* Save Button */}
-                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-700/50">
-                            <div className="flex-1">
-                                {authMessage && (
-                                    <p className="text-xs text-emerald-400">{authMessage}</p>
-                                )}
-                                {authError && (
-                                    <p className="text-xs text-rose-400">{authError}</p>
-                                )}
-                            </div>
-                            <button
-                                type="button"
-                                onClick={saveAuthSettings}
-                                disabled={savingAuth || loadingAuth}
-                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-blue-600 text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                                {savingAuth ? (
-                                    <>
-                                        <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                        Saving...
-                                    </>
-                                ) : (
-                                    <>
-                                        <Check className="h-4 w-4" />
-                                        Save Settings
-                                    </>
-                                )}
-                            </button>
-                        </div>
-
-                        {/* User list */}
-                        <div className={`mt-4 pt-4 border-t border-slate-700/50 ${authMethod === "password" ? "opacity-40 pointer-events-none" : ""}`}>
-                            <div className="flex items-center justify-between mb-3">
-                                <div className="flex items-center gap-2">
-                                    <Users size={15} className="text-slate-400" />
-                                    <h4 className="text-sm font-semibold text-slate-200">Users</h4>
-                                    {users.filter(u => u.status === "pending").length > 0 && (
-                                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 font-medium">
-                                            {users.filter(u => u.status === "pending").length} pending
-                                        </span>
-                                    )}
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={fetchUsers}
-                                    disabled={loadingUsers || authMethod === "password"}
-                                    className="text-xs text-primary hover:text-blue-400 transition disabled:opacity-50"
-                                >
-                                    {loadingUsers ? "Loading..." : "Refresh"}
-                                </button>
-                            </div>
-
-                            {authMethod === "password" ? (
-                                <p className="text-xs text-slate-500 py-3 text-center">Enable Plex authentication to manage users.</p>
-                            ) : loadingUsers && users.length === 0 ? (
-                                <p className="text-xs text-slate-500 py-3 text-center">Loading users...</p>
-                            ) : users.length === 0 ? (
-                                <p className="text-xs text-slate-500 py-3 text-center">No Plex users have signed in yet.</p>
-                            ) : (
-                                <div className="space-y-2">
-                                    {users.map((u) => (
-                                        <UserRow
-                                            key={u.id}
-                                            user={u}
-                                            currentUsername={currentUsername}
-                                            onUpdate={fetchUsers}
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    </CollapsibleFormSection>
-                    </div>
-
-                    <CollapsibleFormSection
-                        title="Rotation Settings"
-                        description="Configure how often the scheduler rotates featured collections."
-                        icon={CalendarSync}
-                        expanded={rotationExpanded}
-                    >
-                        <FieldRow label="Automatic rotations">
-                            <div className="flex items-center justify-between rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 px-3 py-2">
-                                <div>
-                                    <p className="text-sm font-semibold text-slate-900 dark:text-white">Enable scheduler</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400">When enabled, rotations run on the configured interval.</p>
-                                </div>
-                                <Switch
-                                    checked={rotationSettings.enabled}
-                                    onChange={() => {
-                                        if (loadingRotation) return;
-                                        setRotationSettings((prev) => ({ ...prev, enabled: !prev.enabled }));
-                                    }}
-                                    className="relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
-                                >
-                                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${rotationSettings.enabled ? 'translate-x-5' : 'translate-x-1'}`} />
-                                </Switch>
-                            </div>
-                        </FieldRow>
-
-                        <FieldRow label="Interval (hours)" hint="How often to rotate featured collections.">
-                            <input
-                                type="number"
-                                min={1}
-                                value={intervalInput}
-                                onChange={(e) => handleIntervalChange(e.target.value)}
-                                disabled={loadingRotation}
-                                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70"
-                            />
-                        </FieldRow>
-
-                        <FieldRow label="Max collections" hint="Global cap on how many collections appear at once.">
-                            <input
-                                type="number"
-                                min={1}
-                                value={maxCollectionsInput}
-                                onChange={(e) => handleMaxCollectionsChange(e.target.value)}
-                                disabled={loadingRotation}
-                                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70"
-                            />
-                        </FieldRow>
-
-                        {enabledLibraries.length >= 2 && (
-                            <FieldRow label="Per-library limits" hint="Optionally limit how many collections can come from each library. Leave empty for no limit.">
-                                <div className="space-y-2">
-                                    {enabledLibraries.map((lib) => (
-                                        <div key={lib.name} className="flex items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2">
-                                            <span className="text-sm text-slate-200 flex-1">{lib.name}</span>
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-xs text-slate-400">Max:</span>
-                                                <input
-                                                    type="number"
-                                                    min={0}
-                                                    placeholder="∞"
-                                                    value={rotationSettings.per_library_limits[lib.name] ?? ""}
-                                                    onChange={(e) => handleLibraryLimitChange(lib.name, e.target.value)}
-                                                    disabled={loadingRotation}
-                                                    className="w-16 rounded-lg border border-slate-600 bg-slate-800 px-2 py-1 text-sm text-slate-100 text-center focus:outline-none focus:ring-2 focus:ring-primary/70 placeholder-slate-500 focus:placeholder-transparent"
-                                                />
-                                            </div>
-                                        </div>
-                                    ))}
-                                    <p className="text-xs text-slate-500 mt-1">
-                                        These limits work alongside the global max. For example: global max=12, Movies max=6, TV max=6 means at most 6 from each library, up to 12 total.
-                                    </p>
-                                </div>
-                            </FieldRow>
-                        )}
-
-                        <FieldRow label="Strategy" hint="Choose how groups are prioritized during rotation.">
-                            <Listbox
-                                value={rotationSettings.strategy}
-                                onChange={(val) =>
-                                    setRotationSettings((prev) => ({
-                                        ...prev,
-                                        strategy: val,
-                                    }))
-                                }
-                                disabled={loadingRotation}
-                            >
-                                <div className="relative">
-                                    <Listbox.Button className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary/70 text-left flex items-center justify-between data-[disabled]:opacity-50">
-                                        <span>
-                                            {rotationSettings.strategy === "weighted" ? "Weighted" :
-                                             rotationSettings.strategy === "lru" ? "Least Recently Used" :
-                                             "Random"}
-                                        </span>
-                                        <ChevronDown size={16} className="text-slate-400" />
-                                    </Listbox.Button>
-
-                                    <Listbox.Options className="absolute z-10 mt-1 w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg shadow-lg overflow-hidden focus:outline-none">
-                                        <Listbox.Option
-                                            value="random"
-                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
-                                        >
-                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
-                                                <span className="data-[selected]:font-medium">Random</span>
-                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
-                                            </div>
-                                        </Listbox.Option>
-                                        <Listbox.Option
-                                            value="weighted"
-                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
-                                        >
-                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
-                                                <span className="data-[selected]:font-medium">Weighted</span>
-                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
-                                            </div>
-                                        </Listbox.Option>
-                                        <Listbox.Option
-                                            value="lru"
-                                            className="px-3 py-2 cursor-pointer transition-colors data-[focus]:bg-slate-100 dark:data-[focus]:bg-slate-800"
-                                        >
-                                            <div className="flex items-center justify-between text-slate-900 dark:text-slate-100 text-sm">
-                                                <span className="data-[selected]:font-medium">Least Recently Used</span>
-                                                <Check size={14} className="text-primary invisible data-[selected]:visible" />
-                                            </div>
-                                        </Listbox.Option>
-                                    </Listbox.Options>
-                                </div>
-                            </Listbox>
-                        </FieldRow>
-
-                        <FieldRow label="Allow repeats" hint="Permit the same collection to appear in consecutive rotations.">
-                            <Switch
-                                checked={rotationSettings.allow_repeats}
-                                onChange={() => {
-                                    if (loadingRotation) return;
-                                    setRotationSettings((prev) => ({
-                                        ...prev,
-                                        allow_repeats: !prev.allow_repeats,
-                                    }));
-                                }}
-                                className="relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
-                            >
-                                <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${rotationSettings.allow_repeats ? 'translate-x-5' : 'translate-x-1'}`} />
-                            </Switch>
-                        </FieldRow>
-
-                        <FieldRow label="Sync all lists on rotation" hint="When enabled, all third-party lists sync on every rotation. When disabled, only selected collections sync.">
-                            <Switch
-                                checked={rotationSettings.sync_all_on_rotation}
-                                onChange={() => {
-                                    if (loadingRotation) return;
-                                    setRotationSettings((prev) => ({
-                                        ...prev,
-                                        sync_all_on_rotation: !prev.sync_all_on_rotation,
-                                    }));
-                                }}
-                                className="relative inline-flex h-6 w-11 items-center rounded-full transition data-[checked]:bg-primary bg-slate-600"
-                            >
-                                <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${rotationSettings.sync_all_on_rotation ? 'translate-x-5' : 'translate-x-1'}`} />
-                            </Switch>
-                        </FieldRow>
-
-                        {/* Save Button */}
-                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-700/50">
-                            <div className="flex-1">
-                                {rotationMessage && (
-                                    <p className="text-xs text-emerald-400">{rotationMessage}</p>
-                                )}
-                                {rotationError && (
-                                    <p className="text-xs text-rose-400">{rotationError}</p>
-                                )}
-                            </div>
-                            <button
-                                type="button"
-                                onClick={saveRotationSettings}
-                                disabled={savingRotation || loadingRotation}
-                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-blue-600 text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                                {savingRotation ? (
-                                    <>
-                                        <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                        Saving...
-                                    </>
-                                ) : (
-                                    <>
-                                        <Check className="h-4 w-4" />
-                                        Save Settings
-                                    </>
-                                )}
-                            </button>
-                        </div>
-                    </CollapsibleFormSection>
-
-                    {/* Collection Blacklist */}
-                    <CollapsibleFormSection
-                        title="Collection Blacklist"
-                        description="Collections that will never be selected during rotation, regardless of which groups they belong to."
-                        icon={Ban}
-                    >
-                        {/* Currently Blacklisted */}
-                        <div className="space-y-2">
-                            <label className="block text-xs font-medium text-red-400 uppercase tracking-wider">
-                                Currently Blacklisted
-                            </label>
-                            {rotationSettings.blacklisted_collections.length > 0 ? (
-                                <div className="flex flex-wrap gap-2">
-                                    {rotationSettings.blacklisted_collections.map((collection) => (
-                                        <button
-                                            key={collection}
-                                            type="button"
-                                            onClick={() => removeFromBlacklist(collection)}
-                                            disabled={loadingRotation}
-                                            className="group inline-flex items-center gap-2 rounded-full border border-red-800/60 bg-red-900/30 px-3 py-1.5 text-xs font-semibold text-red-100 hover:border-red-600 hover:bg-red-900/50 transition-all disabled:opacity-50"
-                                        >
-                                            {collection}
-                                            <span className="text-red-400 group-hover:text-red-200">×</span>
-                                        </button>
-                                    ))}
-                                </div>
-                            ) : (
-                                <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/20 p-3 text-center">
-                                    <p className="text-xs text-slate-500">No collections blacklisted yet.</p>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Search and Filter */}
-                        <div className="space-y-3 pt-4 border-t border-slate-700/50">
-                            <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider">
-                                Add to Blacklist
-                            </label>
-                            <div className="relative">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
-                                <input
-                                    type="text"
-                                    value={blacklistSearch}
-                                    onChange={(e) => setBlacklistSearch(e.target.value)}
-                                    placeholder="Search collections..."
-                                    className="w-full pl-10 pr-4 py-2 bg-slate-800/60 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-red-500/50"
-                                />
-                            </div>
-                            <div className="flex gap-2 flex-wrap">
-                                {(["all", "plex", "trakt", "letterboxd", "mdblist", "anilist"] as const).map((filter) => (
-                                    <button
-                                        key={filter}
-                                        type="button"
-                                        onClick={() => setBlacklistSourceFilter(filter)}
-                                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${
-                                            blacklistSourceFilter === filter
-                                                ? filter === "all"
-                                                    ? "bg-red-600 text-white"
-                                                    : "text-white"
-                                                : "bg-slate-800/60 text-slate-300 hover:bg-slate-700"
-                                        }`}
-                                        style={
-                                            blacklistSourceFilter === filter && filter !== "all"
-                                                ? {
-                                                      backgroundColor:
-                                                          filter === "plex"
-                                                              ? "#b8860b"
-                                                              : filter === "trakt"
-                                                              ? "#8b2e82"
-                                                              : filter === "letterboxd"
-                                                              ? "#00a63d"
-                                                              : filter === "anilist"
-                                                              ? "#2b7de9"
-                                                              : "#4284c9",
-                                                  }
-                                                : undefined
-                                        }
-                                    >
-                                        {filter === "anilist" ? "AniList" : filter.charAt(0).toUpperCase() + filter.slice(1)}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Collection Grid */}
-                        <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 mt-4">
-                            {paginatedBlacklistSources.map((source) => (
-                                <button
-                                    key={`${source.source}-${source.name}`}
-                                    type="button"
-                                    onClick={() => addToBlacklist(source.name)}
-                                    className="flex flex-col gap-1 rounded-lg border border-slate-800/60 bg-slate-900/50 p-2.5 text-left text-sm text-slate-100 transition-all duration-200 hover:border-red-500/40 hover:bg-red-900/20"
-                                >
-                                    <div className="flex items-start justify-between gap-2">
-                                        <p className="font-semibold text-xs leading-tight flex-1 line-clamp-1">{source.name}</p>
-                                        <span
-                                            className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold flex-shrink-0 text-white"
-                                            style={{
-                                                backgroundColor:
-                                                    source.source === "plex"
-                                                        ? "#e5a00d"
-                                                        : source.source === "trakt"
-                                                        ? "#af35a3"
-                                                        : source.source === "letterboxd"
-                                                        ? "#00a63d"
-                                                        : "#4284c9",
-                                            }}
-                                        >
-                                            {source.source.charAt(0).toUpperCase() + source.source.slice(1)}
-                                        </span>
-                                    </div>
-                                    {source.detail && (
-                                        <p className="text-[10px] text-slate-500 line-clamp-1">{source.detail}</p>
-                                    )}
-                                </button>
-                            ))}
-                        </div>
-
-                        {availableBlacklistSources.length === 0 && (
-                            <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/20 p-3 text-center mt-4">
-                                <p className="text-xs text-slate-500">
-                                    {collectionSources.length === 0
-                                        ? "No collections found. Configure Plex or integrations first."
-                                        : "No matching collections found."}
-                                </p>
-                            </div>
-                        )}
-
-                        {/* Pagination */}
-                        {blacklistTotalPages > 1 && (
-                            <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-800/60">
-                                <p className="text-xs text-slate-400">
-                                    Showing {((blacklistPage - 1) * blacklistItemsPerPage) + 1}-{Math.min(blacklistPage * blacklistItemsPerPage, availableBlacklistSources.length)} of {availableBlacklistSources.length}
-                                </p>
-                                <div className="flex gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => setBlacklistPage((p) => Math.max(1, p - 1))}
-                                        disabled={blacklistPage === 1}
-                                        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800/60 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                    >
-                                        Previous
-                                    </button>
-                                    <div className="flex items-center gap-1">
-                                        {Array.from({ length: blacklistTotalPages }, (_, i) => i + 1).map((page) => (
-                                            <button
-                                                key={page}
-                                                type="button"
-                                                onClick={() => setBlacklistPage(page)}
-                                                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${
-                                                    blacklistPage === page
-                                                        ? "bg-red-600 text-white"
-                                                        : "bg-slate-800/60 text-slate-300 hover:bg-slate-700"
-                                                }`}
-                                            >
-                                                {page}
-                                            </button>
-                                        ))}
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => setBlacklistPage((p) => Math.min(blacklistTotalPages, p + 1))}
-                                        disabled={blacklistPage === blacklistTotalPages}
-                                        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800/60 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                    >
-                                        Next
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Save Button */}
-                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-700/50">
-                            <div className="flex-1">
-                                {rotationMessage && (
-                                    <p className="text-xs text-emerald-400">{rotationMessage}</p>
-                                )}
-                                {rotationError && (
-                                    <p className="text-xs text-rose-400">{rotationError}</p>
-                                )}
-                            </div>
-                            <button
-                                type="button"
-                                onClick={saveRotationSettings}
-                                disabled={savingRotation || loadingRotation}
-                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                                {savingRotation ? (
-                                    <>
-                                        <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                        Saving...
-                                    </>
-                                ) : (
-                                    <>
-                                        <Check className="h-4 w-4" />
-                                        Save Blacklist
-                                    </>
-                                )}
-                            </button>
-                        </div>
-                    </CollapsibleFormSection>
-                </>
+                    <TautulliIntegration />
+                    <SeerrIntegration />
+                </div>
             ) : null}
 
             {activeTab === "logs" ? (
@@ -1680,7 +1751,7 @@ export default function SettingsPage() {
                                     type="button"
                                     onClick={handleExport}
                                     disabled={exporting}
-                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-blue-600 text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     {exporting ? (
                                         <>
@@ -1761,7 +1832,7 @@ export default function SettingsPage() {
                                     type="button"
                                     onClick={handleImport}
                                     disabled={!selectedFile || importing || validating || (validationResult !== null && !validationResult.ok)}
-                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-blue-600 text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white text-sm font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     {importing ? (
                                         <>

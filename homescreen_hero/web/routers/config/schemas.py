@@ -14,6 +14,8 @@ from homescreen_hero.core.config.schema import (
     LetterboxdSource,
     MDBListSettings,
     MDBListSource,
+    TMDbSettings,
+    TMDbSource,
     AniListSettings,
     AniListSource,
     MALSettings,
@@ -21,6 +23,7 @@ from homescreen_hero.core.config.schema import (
     TautulliSettings,
     SeerrSettings,
     CollectionGroupConfig,
+    SmartGroupRule,
     DisplaySettings,
 )
 
@@ -118,6 +121,11 @@ class CollectionGroupPayload(CollectionGroupConfig):
     pass
 
 
+# Partial update for target_users on a group.
+class GroupTargetUsersPayload(BaseModel):
+    target_users: Optional[List[str]] = None
+
+
 # Incoming payload for rotation settings updates.
 class RotationConfigSaveRequest(RotationSettings):
     pass
@@ -136,13 +144,15 @@ class GroupReorderRequest(BaseModel):
 class CollectionSourcesResponse(BaseModel):
     class CollectionSource(BaseModel):
         name: str
-        source: Literal["plex", "trakt", "letterboxd", "mdblist", "anilist", "mal"]
+        source: Literal["plex", "trakt", "letterboxd", "mdblist", "tmdb", "anilist", "mal"]
         detail: Optional[str] = None
+        poster_url: Optional[str] = None
 
     plex: List[CollectionSource]
     trakt: List[CollectionSource]
     letterboxd: List[CollectionSource]
     mdblist: List[CollectionSource]
+    tmdb: List[CollectionSource]
     anilist: List[CollectionSource]
     mal: List[CollectionSource]
 
@@ -247,6 +257,53 @@ class MDBListMissingItemOut(BaseModel):
     times_seen: int
 
 
+# Incoming payload for TMDb settings updates.
+class TMDbConfigSaveRequest(TMDbSettings):
+    pass
+
+
+# Incoming payload for TMDb source create/update operations.
+class TMDbSourcePayload(TMDbSource):
+    pass
+
+
+# Status information for a TMDb source including sync history.
+class TMDbSourceStatus(BaseModel):
+    source_index: int
+    name: str
+    last_sync_time: Optional[datetime] = None
+    sync_status: Literal["success", "error", "pending", "never_synced"]
+    error_message: Optional[str] = None
+    items_matched: int = 0
+    items_total: int = 0
+
+
+# Response from manual TMDb sync operation.
+class TMDbSyncResponse(BaseModel):
+    ok: bool
+    message: str
+    items_total: int
+    items_matched: int
+    items_missing: int
+    sync_time: datetime
+
+
+# A TMDb item that wasn't found in Plex.
+class TMDbMissingItemOut(BaseModel):
+    title: str
+    year: Optional[int]
+    tmdb_id: Optional[int]
+    media_type: Optional[str]
+    first_seen: datetime
+    last_seen: datetime
+    times_seen: int
+
+
+# Request payload for testing TMDb connection with provided credentials.
+class TMDbTestRequest(BaseModel):
+    api_key: Optional[str] = None  # Falls back to HSH_TMDB_API_KEY env var
+
+
 # Status information for an AniList source including sync history.
 class AniListSourceStatus(BaseModel):
     source_index: int
@@ -330,10 +387,12 @@ class ConfigExistsResponse(BaseModel):
 class EnvVarsResponse(BaseModel):
     plex_token_from_env: bool
     plex_url_from_env: bool
+    plex_url_value: Optional[str] = None
     auth_password_from_env: bool
     auth_secret_from_env: bool
     trakt_client_id_from_env: bool
     mdblist_api_key_from_env: bool
+    tmdb_api_key_from_env: bool
     tautulli_api_key_from_env: bool
     tautulli_url_from_env: bool
     seerr_api_key_from_env: bool
@@ -344,13 +403,11 @@ class EnvVarsResponse(BaseModel):
 # Request payload for testing Trakt connection with provided credentials.
 class TraktTestRequest(BaseModel):
     client_id: Optional[str] = None  # Falls back to HSH_TRAKT_CLIENT_ID env var
-    base_url: str = "https://api.trakt.tv"
 
 
 # Request payload for testing MDBList connection with provided credentials.
 class MDBListTestRequest(BaseModel):
     api_key: Optional[str] = None  # Falls back to HSH_MDBLIST_API_KEY env var
-    base_url: str = "https://api.mdblist.com"
 
 
 # Request payload for testing Tautulli connection with provided credentials.
@@ -370,30 +427,26 @@ class MALTestRequest(BaseModel):
     client_id: Optional[str] = None  # Falls back to HSH_MAL_CLIENT_ID env var
 
 
+# Request payload for testing Plex connection with provided credentials.
+class PlexTestRequest(BaseModel):
+    plex_url: Optional[str] = None  # Falls back to HSH_PLEX_URL env var
+    plex_token: Optional[str] = None  # Falls back to HSH_PLEX_TOKEN env var
+
+
 # Response for connection test endpoints.
 class ConnectionTestResponse(BaseModel):
     ok: bool
     error: Optional[str] = None
+    libraries: Optional[List[dict]] = None  # Only populated by test-plex
 
 
 # Incoming payload for quick start setup.
 class QuickStartRequest(BaseModel):
     plex_url: str
     plex_token: str
-    trakt_enabled: bool = False
-    trakt_client_id: Optional[str] = None
-    trakt_base_url: str = "https://api.trakt.tv"
-    mdblist_enabled: bool = False
-    mdblist_api_key: Optional[str] = None
-    mdblist_base_url: str = "https://api.mdblist.com"
-    tautulli_enabled: bool = False
-    tautulli_api_key: Optional[str] = None
-    tautulli_base_url: str = "http://localhost:8181"
-    seerr_enabled: bool = False
-    seerr_api_key: Optional[str] = None
-    seerr_base_url: str = "http://localhost:5055"
     libraries: List[str] = []
-    auth_enabled: bool = False
+    auth_enabled: bool = True
+    auth_method: Literal["password", "plex", "both"] = "password"
     auth_username: Optional[str] = None
     auth_password: Optional[str] = None
     rotation_enabled: bool = False
@@ -401,6 +454,10 @@ class QuickStartRequest(BaseModel):
     rotation_max_collections: int = 5
     rotation_strategy: str = "random"
     rotation_allow_repeats: bool = False
+    rotation_mode: Literal["groups", "auto_rotate"] = "groups"
+    visibility_home: bool = True
+    visibility_shared: bool = False
+    visibility_recommended: bool = False
 
 
 class ConfigValidateResponse(BaseModel):
@@ -428,3 +485,25 @@ class AuthSettingsResponse(BaseModel):
 class AuthSettingsSaveRequest(BaseModel):
     method: Literal["password", "plex", "both"]
     auto_approve_users: bool
+
+
+# Smart group preview request — evaluate rules and return matching collections.
+class SmartGroupPreviewRequest(BaseModel):
+    rules: List[SmartGroupRule]
+
+
+class SmartGroupPreviewCollection(BaseModel):
+    name: str
+    poster_url: Optional[str] = None
+
+
+class SmartGroupPreviewResponse(BaseModel):
+    collections: List[SmartGroupPreviewCollection]
+    count: int
+
+
+# Available values for smart group rule builder dropdowns.
+class SmartFilterOptionsResponse(BaseModel):
+    labels: List[str]
+    sources: List[str]
+    libraries: List[str]

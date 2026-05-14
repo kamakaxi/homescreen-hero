@@ -4,6 +4,7 @@ import IconButton from "./IconButton";
 import VersionBadge from "./VersionBadge";
 import { useAuth } from "../utils/auth";
 
+
 function NavItem({ to, label }: { to: string; label: string }) {
     return (
         <NavLink
@@ -50,7 +51,7 @@ export default function TopNav() {
                     <NavItem to="/" label="Dashboard" />
                     <NavItem to="/groups" label="Groups" />
                     <NavItem to="/collections" label="Collections" />
-                    <NavItem to="/integrations" label="Integrations" />
+                    <NavItem to="/lists" label="Lists" />
                     <NavItem to="/tools" label="Tools" />
                 </nav>
 

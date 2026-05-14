@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Iterable, List, Set
 
 import requests
@@ -15,6 +16,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from ..config.schema import AppConfig
 
 logger = logging.getLogger(__name__)
+
+_REORDER_MOVE_DELAY_SECONDS = 0.2
+_REORDER_SETTLE_DELAY_SECONDS = 0.35
+_REORDER_MAX_ATTEMPTS = 2
 
 
 def _make_session() -> requests.Session:
@@ -55,14 +60,31 @@ def get_library_collections(
     return by_title
 
 
-def get_configured_collection_names(config: AppConfig) -> Set[str]:
+def get_collection_labels(collection: object) -> List[str]:
+    # Extract label tags from a PlexAPI Collection object.
+    # Returns empty list if collection has no labels or labels aren't loaded.
+    return [label.tag for label in getattr(collection, "labels", [])]
+
+
+def get_collection_item_count(collection: object) -> int:
+    # Get the number of items in a collection without fetching them all.
+    return getattr(collection, "childCount", 0)
+
+
+def get_configured_collection_names(
+    config: AppConfig,
+    smart_group_collections: Dict[str, List[str]] | None = None,
+) -> Set[str]:
     # Build the set of all collection names referenced in your groups and integration sources
     names: Set[str] = set()
 
-    # Add collections from groups
+    # Add collections from groups (use resolved smart group collections when available)
     for group in config.groups:
-        for name in group.collections:
-            names.add(name)
+        if group.smart and smart_group_collections and group.name in smart_group_collections:
+            names.update(smart_group_collections[group.name])
+        else:
+            for name in group.collections:
+                names.add(name)
 
     # Add collections from Trakt sources
     if config.trakt and config.trakt.enabled and config.trakt.sources:
@@ -235,6 +257,8 @@ def apply_home_screen_selection(
     collection_visibility: Dict[str, Dict[str, bool]],
     *,
     dry_run: bool = False,
+    smart_group_collections: Dict[str, List[str]] | None = None,
+    collection_sort: Dict[str, str] | None = None,
 ) -> List[str]:
     # Apply the chosen collections to the Plex Home screen
     #
@@ -263,7 +287,7 @@ def apply_home_screen_selection(
         return []
 
     selected_set = set(selected_collection_names)
-    configured_names = get_configured_collection_names(config)
+    configured_names = get_configured_collection_names(config, smart_group_collections)
 
     # Get all collections that have ever been rotated to ensure we clean them up if removed
     _, usage_map = get_rotation_history_context()
@@ -342,6 +366,13 @@ def apply_home_screen_selection(
                     shared=visibility.get("shared", False),
                     recommended=visibility.get("recommended", False)
                 )
+                # Apply collection sort if configured for this collection's group
+                if collection_sort and name in collection_sort:
+                    try:
+                        coll.sortUpdate(sort=collection_sort[name])
+                        logger.debug("Set sort order for '%s' to '%s'", name, collection_sort[name])
+                    except Exception:
+                        logger.warning("Failed to update sort for '%s' (may be a smart collection)", name)
         else:
             # Collection is either configured but not selected, or was previously rotated but removed from config
             if name in previously_rotated_names and name not in configured_names:
@@ -368,10 +399,137 @@ def apply_home_screen_selection(
             config,
             pinned_names=pinned_names,
             pinned_order=pinned_order,
+            smart_group_collections=smart_group_collections,
         )
         reorder_homescreen_collections(server, config, ordered_applied)
 
     return applied
+
+
+def _get_managed_hubs_for_library(server: PlexServer, library_name: str) -> List[Any]:
+    library = server.library.section(library_name)
+    return [hub for hub in library.managedHubs() if hasattr(hub, "title")]
+
+
+def _get_target_hub_order_for_library(
+    managed_hubs: List[Any],
+    ordered_collection_names: List[str],
+) -> List[str]:
+    hub_titles = {hub.title for hub in managed_hubs}
+    return [name for name in ordered_collection_names if name in hub_titles]
+
+
+def _get_current_hub_order_for_library(
+    server: PlexServer,
+    library_name: str,
+    target_names: List[str],
+) -> List[str]:
+    target_set = set(target_names)
+    return [
+        hub.title
+        for hub in _get_managed_hubs_for_library(server, library_name)
+        if hub.title in target_set
+    ]
+
+
+def _reorder_library_hubs(
+    server: PlexServer,
+    library_name: str,
+    target_order: List[str],
+) -> List[str]:
+    if len(target_order) < 2:
+        return list(target_order)
+
+    current_order = _get_current_hub_order_for_library(server, library_name, target_order)
+    if current_order == target_order:
+        logger.debug(
+            "Managed hub order already correct for '%s': %s",
+            library_name,
+            target_order,
+        )
+        return current_order
+
+    # Move first item to top, then chain each subsequent item after the previous one.
+    # This gives Plex an explicit anchor for each move rather than racing for position 0.
+    for attempt in range(1, _REORDER_MAX_ATTEMPTS + 1):
+        hub_map = {
+            hub.title: hub
+            for hub in _get_managed_hubs_for_library(server, library_name)
+        }
+
+        first_hub = hub_map.get(target_order[0])
+        if first_hub is None:
+            logger.warning(
+                "First collection '%s' not found in managed hubs for '%s'",
+                target_order[0],
+                library_name,
+            )
+            break
+
+        try:
+            first_hub.move(after=None)
+            logger.debug("Moved '%s' to top in '%s'", target_order[0], library_name)
+        except Exception as e:
+            logger.warning("Failed to move collection '%s' in '%s': %s", target_order[0], library_name, e)
+            break
+
+        prev_hub = first_hub
+        for name in target_order[1:]:
+            hub = hub_map.get(name)
+            if hub is None:
+                logger.debug(
+                    "Skipping '%s' during reorder for '%s' - not found in managed hubs",
+                    name,
+                    library_name,
+                )
+                continue
+
+            try:
+                time.sleep(_REORDER_MOVE_DELAY_SECONDS)
+                hub.move(after=prev_hub)
+                logger.debug(
+                    "Moved '%s' after '%s' in '%s' (attempt %d/%d)",
+                    name,
+                    prev_hub.title,
+                    library_name,
+                    attempt,
+                    _REORDER_MAX_ATTEMPTS,
+                )
+                prev_hub = hub
+            except Exception as e:
+                logger.warning(
+                    "Failed to move collection '%s' in '%s': %s",
+                    name,
+                    library_name,
+                    e,
+                )
+
+        time.sleep(_REORDER_SETTLE_DELAY_SECONDS)
+        current_order = _get_current_hub_order_for_library(
+            server,
+            library_name,
+            target_order,
+        )
+        if current_order == target_order:
+            logger.debug(
+                "Verified managed hub order for '%s' on attempt %d/%d",
+                library_name,
+                attempt,
+                _REORDER_MAX_ATTEMPTS,
+            )
+            return current_order
+
+        logger.warning(
+            "Managed hub order mismatch for '%s' after attempt %d/%d. "
+            "Requested=%s Current=%s",
+            library_name,
+            attempt,
+            _REORDER_MAX_ATTEMPTS,
+            target_order,
+            current_order,
+        )
+
+    return current_order
 
 
 def reorder_homescreen_collections(
@@ -385,68 +543,45 @@ def reorder_homescreen_collections(
     # Plex keeps libraries separate, so we reorder within each library.
     enabled_libraries = [lib.name for lib in config.plex.libraries if lib.enabled]
 
-    # Build map: collection_name -> (ManagedHub, library_name)
-    hub_map: Dict[str, tuple[Any, str]] = {}
+    library_orders: Dict[str, List[str]] = {}
+    total_hubs = 0
     for library_name in enabled_libraries:
         try:
-            library = server.library.section(library_name)
-            hubs = library.managedHubs()
-            for hub in hubs:
-                if hasattr(hub, "title"):
-                    hub_map[hub.title] = (hub, library_name)
+            hubs = _get_managed_hubs_for_library(server, library_name)
+            total_hubs += len(hubs)
+            target_order = _get_target_hub_order_for_library(
+                hubs,
+                ordered_collection_names,
+            )
+            if target_order:
+                library_orders[library_name] = target_order
         except Exception as e:
             logger.warning(
                 "Could not get managed hubs for library %s: %s", library_name, e
             )
 
-    logger.debug("Found %d collections available for reordering", len(hub_map))
+    logger.debug(
+        "Found %d managed hubs for reordering, requested order: %s",
+        total_hubs,
+        ordered_collection_names,
+    )
 
     if dry_run:
         logger.info("Dry run - would reorder collections: %s", ordered_collection_names)
         return ordered_collection_names
 
-    # Group requested collections by library, preserving order within each library
-    library_orders: Dict[str, List[tuple[str, Any]]] = {}
-    for name in ordered_collection_names:
-        if name not in hub_map:
-            # Collection might be a built-in Plex hub (not a custom collection)
-            logger.debug("Skipping '%s' - not a custom collection or not found", name)
-            continue
-        hub, library_name = hub_map[name]
-        if library_name not in library_orders:
-            library_orders[library_name] = []
-        library_orders[library_name].append((name, hub))
-
     # Reorder within each library
     applied_order: List[str] = []
-    for library_name, collections in library_orders.items():
-        logger.debug("Reordering %d collections in '%s'", len(collections), library_name)
-
-        if len(collections) < 2:
-            for name, _ in collections:
-                applied_order.append(name)
-            continue
-
-        # Move first item to top, then position others relative to it
-        first_name, first_hub = collections[0]
-        try:
-            first_hub.move(after=None)
-            applied_order.append(first_name)
-            logger.debug("Moved '%s' to top", first_name)
-        except Exception as e:
-            logger.warning("Failed to move collection '%s': %s", first_name, e)
-            continue
-
-        # Move subsequent items after the previous one
-        prev_hub = first_hub
-        for name, hub in collections[1:]:
-            try:
-                hub.move(after=prev_hub)
-                applied_order.append(name)
-                logger.debug("Moved '%s' after '%s'", name, prev_hub.title)
-                prev_hub = hub
-            except Exception as e:
-                logger.warning("Failed to move collection '%s': %s", name, e)
+    for library_name, target_order in library_orders.items():
+        logger.debug(
+            "Reordering %d collections in '%s': %s",
+            len(target_order),
+            library_name,
+            target_order,
+        )
+        applied_order.extend(
+            _reorder_library_hubs(server, library_name, target_order)
+        )
 
     if applied_order:
         logger.info("Reordered %d collections on homescreen", len(applied_order))
@@ -456,23 +591,104 @@ def reorder_homescreen_collections(
 
 # Home user functions for watch history copying
 
+def get_recently_added(server: PlexServer, config: AppConfig, limit: int = 10) -> List[Dict[str, Any]]:
+    # Fetch recently added items across all enabled Plex libraries.
+    # Returns a flat list sorted by addedAt (newest first), limited to `limit` items.
+    from ..poster_proxy import create_proxy_url
+
+    enabled_libraries = [lib.name for lib in config.plex.libraries if lib.enabled]
+    all_items: List[Dict[str, Any]] = []
+
+    for library_name in enabled_libraries:
+        try:
+            library = server.library.section(library_name)
+            recent = library.recentlyAdded(maxresults=limit)
+
+            for item in recent:
+                thumb = None
+                if getattr(item, "thumb", None):
+                    try:
+                        full_url = server.url(item.thumb, includeToken=True)
+                        plex_url = server.transcodeImage(full_url, height=450, width=300, minSize=1)
+                        thumb = create_proxy_url(plex_url)
+                    except Exception:
+                        thumb = None
+
+                media_type = getattr(item, "type", "unknown")
+
+                all_items.append({
+                    "title": item.title,
+                    "year": getattr(item, "year", None),
+                    "added_at": item.addedAt.isoformat() if item.addedAt else None,
+                    "thumb": thumb,
+                    "media_type": media_type,
+                    "rating_key": str(item.ratingKey),
+                    "library": library_name,
+                })
+        except Exception as e:
+            logger.warning("Failed to fetch recently added from '%s': %s", library_name, e)
+
+    # Sort by added_at descending and trim to limit
+    all_items.sort(key=lambda x: x["added_at"] or "", reverse=True)
+    return all_items[:limit]
+
+
 def get_plex_account(config: AppConfig) -> MyPlexAccount:
     # Create MyPlexAccount from configured token for home user access
     # This requires a Plex.tv account token, not a local server token
     return MyPlexAccount(token=config.plex.token)
 
 
-def get_home_users(config: AppConfig) -> List[Dict[str, Any]]:
-    # Return list of home users with id, username, title, thumb, is_admin
-    # Note: For managed users, username may be empty - use title for switchHomeUser()
+def get_all_plex_users(config: AppConfig) -> List[Dict[str, Any]]:
+    # Return all Plex users (friends + home) with id, username, title, thumb, is_home, is_admin
+    # Used by user targeting to compute exclusion sets
     account = get_plex_account(config)
     users = []
 
-    # Include the main account owner
-    # Use title as the primary identifier for consistency with managed users
+    # Admin account
     users.append({
         "id": account.id,
-        "username": account.title or account.username,  # Use title as username for consistency
+        "username": account.username or account.title,
+        "title": account.title or account.username,
+        "thumb": account.thumb,
+        "is_home": True,
+        "is_admin": True,
+    })
+
+    skipped = 0
+    for user in account.users():
+        # Skip users with no active server access (old/removed friends, pending invites)
+        servers = getattr(user, "servers", []) or []
+        if not servers or all(getattr(s, "pending", False) for s in servers):
+            skipped += 1
+            continue
+
+        username = getattr(user, "username", "") or ""
+        title = getattr(user, "title", "") or ""
+        users.append({
+            "id": user.id,
+            "username": username or title,  # Fall back to title for managed users
+            "title": title or username,
+            "thumb": getattr(user, "thumb", None),
+            "is_home": bool(getattr(user, "home", False)),
+            "is_admin": False,
+        })
+
+    if skipped:
+        logger.debug(f"Skipped {skipped} users with no active server access")
+    logger.debug(f"Found {len(users)} total Plex users")
+    return users
+
+
+def get_home_users(config: AppConfig) -> List[Dict[str, Any]]:
+    # Return list of home users with id, username, title, thumb, is_admin
+    account = get_plex_account(config)
+    users = []
+
+    # Include server owner account (unsure how I plan to handle admin account labels, will come back)
+    users.append({
+        "id": account.id,
+        "username": account.title or account.username,
         "title": account.title or account.username,
         "thumb": account.thumb,
         "is_admin": True,
@@ -495,28 +711,23 @@ def get_home_users(config: AppConfig) -> List[Dict[str, Any]]:
 
 def get_server_for_user(config: AppConfig, username: str) -> PlexServer:
     # Get PlexServer authenticated as a specific home user
-    # Uses switchHomeUser to switch context, then connects via resource
     account = get_plex_account(config)
 
-    # If it's the admin account, just return normal server
+    # Just return normal server if it's my admin account
     if username == account.username or username == account.title:
         return get_plex_server(config)
 
-    # Switch to the home user's context
+    # Switch to the home user
     logger.debug(f"Switching to home user: {username}")
     user_account = account.switchHomeUser(username)
 
-    # Find the server resource and connect
-    # For managed users, we need to go through the resource to get proper auth
     for resource in user_account.resources():
         if resource.product == "Plex Media Server":
             try:
-                # Try to connect - it will use the best available connection
                 logger.debug(f"Connecting to server as {username} via resource")
                 return resource.connect(timeout=30)
             except Exception as e:
                 logger.warning(f"Failed to connect via resource: {e}")
-                # If that fails, try forcing the configured base_url
                 try:
                     logger.debug(f"Retrying with configured base_url")
                     return PlexServer(config.plex.base_url, resource.accessToken, session=_make_session())

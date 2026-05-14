@@ -10,6 +10,7 @@ export interface WidgetDefinition {
     section: WidgetSection;
     requiresIntegration?: RequiredIntegration;
     colSpan?: number; // 1 = single column, 2 = two columns, 4 = full width
+    allowedColSpans?: number[]; // If set, widget can be resized between these values
 }
 
 export const widgetRegistry: Record<string, WidgetDefinition> = {
@@ -84,6 +85,7 @@ export const widgetRegistry: Record<string, WidgetDefinition> = {
         category: "activity",
         section: "main",
         colSpan: 2,
+        allowedColSpans: [1, 2],
     },
     "seerr-carousel": {
         id: "seerr-carousel",
@@ -93,6 +95,30 @@ export const widgetRegistry: Record<string, WidgetDefinition> = {
         section: "main",
         requiresIntegration: "seerr",
         colSpan: 2,
+    },
+    "auto-request-activity": {
+        id: "auto-request-activity",
+        name: "Auto-Request Activity",
+        description: "Recent items automatically requested via Seerr",
+        category: "integrations",
+        section: "main",
+        requiresIntegration: "seerr",
+        colSpan: 2,
+    },
+    "library-composition": {
+        id: "library-composition",
+        name: "Library Composition",
+        description: "Genre, resolution, and content rating breakdowns",
+        category: "analytics",
+        section: "main",
+        colSpan: 2,
+    },
+    "recently-added": {
+        id: "recently-added",
+        name: "Recently Added",
+        description: "Latest additions to your Plex libraries",
+        category: "activity",
+        section: "main",
     },
 };
 

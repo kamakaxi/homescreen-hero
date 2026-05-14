@@ -13,7 +13,6 @@ import {
     Lightbulb,
     List,
     Loader2,
-    Minus,
     Pencil,
     Plus,
     RefreshCw,
@@ -24,6 +23,7 @@ import {
     Trash2,
 } from "lucide-react";
 import { Listbox, Switch } from "@headlessui/react";
+import { Slider } from "../components/ui/slider";
 import {
     DndContext,
     closestCenter,
@@ -44,6 +44,14 @@ import { CSS } from "@dnd-kit/utilities";
 import GroupCoverMosaic from "../components/GroupCoverMosaic";
 import { ConfirmDialog } from "../components/ui/confirm-dialog";
 import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogDescription,
+    DialogCloseButton,
+} from "../components/ui/dialog";
+import {
     Sheet,
     SheetContent,
     SheetHeader,
@@ -52,7 +60,10 @@ import {
     SheetBody,
     SheetCloseButton,
 } from "../components/ui/sheet";
-import { getGroupStatus } from "../utils/dates";
+import { getGroupStatus, timeAgo } from "../utils/dates";
+import { Sparkles } from "lucide-react";
+import OnboardingHint from "../components/OnboardingHint";
+import { useOnboarding } from "../utils/onboarding";
 
 type DateRange = {
     start: string;
@@ -68,6 +79,8 @@ type CollectionGroup = {
     min_gap_rotations: number;
     display_order: number;
     date_range?: DateRange | null;
+    smart?: boolean;
+    rules?: unknown[];
     collections: string[];
 };
 
@@ -92,12 +105,11 @@ type RotationSettings = {
     enabled: boolean;
     interval_hours: number;
     max_collections: number;
-    strategy: string;
+    group_order: string;
     allow_repeats: boolean;
     sync_all_on_rotation: boolean;
     blacklisted_collections: string[];
     auto_rotate: AutoRotateSettings;
-    randomize_group_order: boolean;
 };
 
 const defaultAutoRotate: AutoRotateSettings = {
@@ -171,6 +183,7 @@ function SortableGroupCard({ id, viewMode, children }: { id: string; viewMode: V
 
 export default function GroupsPage() {
     const navigate = useNavigate();
+    const { completeStep } = useOnboarding();
     const [groups, setGroups] = useState<CollectionGroup[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -191,11 +204,21 @@ export default function GroupsPage() {
     const [savingAutoRotate, setSavingAutoRotate] = useState(false);
     const [rotationSettings, setRotationSettings] = useState<RotationSettings | null>(null);
 
+    // Group type picker dialog
+    const [showTypePicker, setShowTypePicker] = useState(false);
+    const [newGroupType, setNewGroupType] = useState<"basic" | "smart" | null>(null);
+    const [newGroupName, setNewGroupName] = useState("");
+    const [creatingGroup, setCreatingGroup] = useState(false);
+    const [createError, setCreateError] = useState<string | null>(null);
+
+    // Last rotated timestamps per group
+    const [groupLastRotated, setGroupLastRotated] = useState<Record<string, string | null>>({});
+
     // Display settings state
     const [displaySettings, setDisplaySettings] = useState<DisplaySettings>({ group_display_mode: "grouped" });
     const [layoutModalOpen, setLayoutModalOpen] = useState(false);
     const [savingDisplay, setSavingDisplay] = useState(false);
-    const [maxCollectionsInput, setMaxCollectionsInput] = useState("");
+    const [, setMaxCollectionsInput] = useState("");
 
     const handleViewModeChange = (mode: ViewMode) => {
         setViewMode(mode);
@@ -236,6 +259,15 @@ export default function GroupsPage() {
             setLibraries(data.libraries ?? []);
         } catch (e) {
             console.error("Failed to fetch libraries:", e);
+        }
+    };
+
+    const fetchGroupLastRotated = async () => {
+        try {
+            const data = await fetchWithAuth("/api/history/group-last-rotated").then((r) => r.json());
+            setGroupLastRotated(data);
+        } catch (e) {
+            console.error("Failed to fetch group last rotated:", e);
         }
     };
 
@@ -414,6 +446,7 @@ export default function GroupsPage() {
         fetchRotationSettings();
         fetchLibraries();
         fetchDisplaySettings();
+        fetchGroupLastRotated();
     }, []);
 
     // Auto-dismiss toast
@@ -453,6 +486,30 @@ export default function GroupsPage() {
             setError(String(e));
         } finally {
             setProcessingIndex(null);
+        }
+    };
+
+    const toggleEnabled = async (index: number) => {
+        const target = groups[index];
+        if (!target) return;
+
+        // Optimistic update — flip locally first to avoid full re-render flash
+        setGroups((prev) => prev.map((g, i) => i === index ? { ...g, enabled: !g.enabled } : g));
+
+        try {
+            const payload = { ...target, enabled: !target.enabled };
+            const r = await fetchWithAuth(`/api/admin/config/groups/${index}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!r.ok) {
+                // Revert on failure
+                setGroups((prev) => prev.map((g, i) => i === index ? { ...g, enabled: target.enabled } : g));
+                throw new Error(await r.text() || "Failed to update group");
+            }
+        } catch (e) {
+            setError(String(e));
         }
     };
 
@@ -512,11 +569,15 @@ export default function GroupsPage() {
                         onClick={() => setLayoutModalOpen(true)}
                         className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 hover:border-primary/50 hover:bg-slate-800 hover:text-white transition-all duration-200 self-start mt-1"
                     >
-                        <LayoutGrid className="h-4 w-4 text-primary" />
-                        Configure Layout
+                        <Home className="h-4 w-4 text-primary" />
+                       Homescreen Settings
                     </button>
                 </div>
             </div>
+
+            <OnboardingHint step="create-group">
+                Create your first collection group to organize which collections rotate onto your Plex homescreen.
+            </OnboardingHint>
 
             {error ? (
                 <div className="flex items-center gap-2 rounded-xl border border-red-900/60 bg-red-900/40 px-4 py-3 text-red-100">
@@ -758,24 +819,41 @@ export default function GroupsPage() {
                                                             type="button"
                                                             onClick={handleRename}
                                                             disabled={processingIndex === originalIndex}
-                                                            className="inline-flex items-center justify-center rounded-lg bg-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-600 disabled:opacity-60"
+                                                            className="inline-flex items-center justify-center rounded-lg bg-primary px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
                                                         >
                                                             {processingIndex === originalIndex ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
                                                         </button>
                                                     </div>
                                                 ) : (
                                                     <div
-                                                        onClick={() => navigate(`/groups/${originalIndex}`)}
+                                                        onClick={() => navigate(group.smart ? `/groups/smart/${originalIndex}` : `/groups/${originalIndex}`)}
                                                         className="group flex flex-1 items-center gap-4 rounded-xl border border-slate-800/60 bg-slate-900/50 px-4 py-3 hover:border-slate-700 hover:bg-slate-900/80 transition-all duration-200 cursor-pointer"
                                                     >
-                                                        <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-semibold ${statusStyles[status]}`}>
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => { e.stopPropagation(); toggleEnabled(originalIndex); }}
+                                                            disabled={processingIndex === originalIndex}
+                                                            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-all duration-200 hover:brightness-125 disabled:opacity-60 ${statusStyles[status]}`}
+                                                        >
                                                             {statusLabels[status]}
-                                                        </span>
+                                                        </button>
+                                                        {group.smart && (
+                                                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/20 text-primary border border-primary/30">
+                                                                <Sparkles className="h-3 w-3" />
+                                                            </span>
+                                                        )}
 
                                                         <span className="text-sm font-semibold text-white truncate">
                                                             {group.name || "Untitled group"}
                                                         </span>
-                                                        <span className="text-xs text-slate-500 shrink-0">{group.collections.length} collections</span>
+                                                        <span className="text-xs text-slate-500 shrink-0">
+                                                            {group.smart ? `${group.rules?.length || 0} rules` : `${group.collections.length} collections`}
+                                                        </span>
+                                                        {groupLastRotated[group.name] && (
+                                                            <span className="hidden sm:inline text-xs text-slate-600 shrink-0" title={`Last rotated: ${new Date(groupLastRotated[group.name]!).toLocaleString()}`}>
+                                                                {timeAgo(groupLastRotated[group.name]!)}
+                                                            </span>
+                                                        )}
 
                                                         {(group.date_range?.start || group.date_range?.end) && (
                                                             <span className="hidden sm:inline-flex rounded-full bg-slate-800 px-2.5 py-0.5 text-xs text-slate-300 border border-slate-700/50 shrink-0">
@@ -811,7 +889,7 @@ export default function GroupsPage() {
                                     })}
                                     {!searchTerm && (
                                         <div
-                                            onClick={() => navigate('/groups/new')}
+                                            onClick={() => setShowTypePicker(true)}
                                             className="group flex items-center gap-3 rounded-xl border-2 border-dashed border-slate-700/50 hover:border-primary/40 hover:bg-slate-800/30 px-4 py-3 ml-8 transition-all duration-300 cursor-pointer"
                                         >
                                             <Plus className="h-4 w-4 text-slate-500 group-hover:text-primary transition-colors shrink-0" />
@@ -830,29 +908,41 @@ export default function GroupsPage() {
                                         return (
                                             <SortableGroupCard key={group.name} id={group.name} viewMode="cards">
                                                 <div
-                                                    onClick={() => navigate(`/groups/${originalIndex}`)}
+                                                    onClick={() => navigate(group.smart ? `/groups/smart/${originalIndex}` : `/groups/${originalIndex}`)}
                                                     className="group relative overflow-hidden rounded-2xl border border-slate-800/60 bg-slate-900/50 shadow-md hover:shadow-xl hover:border-slate-700 transition-all duration-300 cursor-pointer"
                                                 >
                                                     <div className="relative">
                                                         {renderCover(group, index)}
-                                                        {(() => {
-                                                            const status = getGroupStatus(group);
-                                                            const statusStyles = {
-                                                                active: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-lg shadow-emerald-500/20',
-                                                                scheduled: 'bg-amber-500/20 text-amber-400 border border-amber-500/30 shadow-lg shadow-amber-500/20',
-                                                                disabled: 'bg-slate-500/20 text-slate-400 border border-slate-500/30 shadow-lg shadow-slate-500/20',
-                                                            };
-                                                            const statusLabels = {
-                                                                active: 'Active',
-                                                                scheduled: 'Scheduled',
-                                                                disabled: 'Disabled',
-                                                            };
-                                                            return (
-                                                                <div className={`absolute left-3 top-3 rounded-full px-3 py-1 text-xs font-semibold backdrop-blur-sm transition-all duration-200 ${statusStyles[status]}`}>
-                                                                    {statusLabels[status]}
+                                                        <div className="absolute left-3 top-3 flex items-center gap-1.5">
+                                                            {(() => {
+                                                                const status = getGroupStatus(group);
+                                                                const statusStyles = {
+                                                                    active: 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-lg shadow-emerald-500/20',
+                                                                    scheduled: 'bg-amber-500/20 text-amber-400 border border-amber-500/30 shadow-lg shadow-amber-500/20',
+                                                                    disabled: 'bg-slate-500/20 text-slate-400 border border-slate-500/30 shadow-lg shadow-slate-500/20',
+                                                                };
+                                                                const statusLabels = {
+                                                                    active: 'Active',
+                                                                    scheduled: 'Scheduled',
+                                                                    disabled: 'Disabled',
+                                                                };
+                                                                return (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => { e.stopPropagation(); toggleEnabled(originalIndex); }}
+                                                                        disabled={processingIndex === originalIndex}
+                                                                        className={`rounded-full px-3 py-1 text-xs font-semibold backdrop-blur-sm transition-all duration-200 hover:brightness-125 disabled:opacity-60 ${statusStyles[status]}`}
+                                                                    >
+                                                                        {statusLabels[status]}
+                                                                    </button>
+                                                                );
+                                                            })()}
+                                                            {group.smart && (
+                                                                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/20 text-primary border border-primary/30 backdrop-blur-sm">
+                                                                    <Sparkles className="h-3 w-3" />
                                                                 </div>
-                                                            );
-                                                        })()}
+                                                            )}
+                                                        </div>
                                                         {(group.date_range?.start || group.date_range?.end) && (
                                                             <div className="absolute right-12 top-3 rounded-full bg-slate-900/80 backdrop-blur-sm px-3 py-1 text-xs font-semibold text-slate-100 border border-slate-700/50">
                                                                 {group.date_range?.start ? new Date(group.date_range.start).toLocaleDateString('en', { month: '2-digit', day: '2-digit' }) : '??/??'}
@@ -876,7 +966,7 @@ export default function GroupsPage() {
                                                                     type="button"
                                                                     onClick={handleRename}
                                                                     disabled={processingIndex === originalIndex}
-                                                                    className="inline-flex items-center justify-center rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-blue-600 disabled:opacity-60"
+                                                                    className="inline-flex items-center justify-center rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
                                                                 >
                                                                     {processingIndex === originalIndex ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                                                                 </button>
@@ -885,7 +975,14 @@ export default function GroupsPage() {
                                                             <div className="flex items-start justify-between gap-3">
                                                                 <div className="min-w-0">
                                                                     <p className="text-lg font-bold text-white truncate" title={group.name}>{group.name || "Untitled group"}</p>
-                                                                    <p className="text-xs text-slate-400">{group.collections.length} collections</p>
+                                                                    <p className="text-xs text-slate-400">
+                                                                        {group.collections.length} collections
+                                                                        {groupLastRotated[group.name] && (
+                                                                            <span className="text-slate-600 ml-2" title={`Last rotated: ${new Date(groupLastRotated[group.name]!).toLocaleString()}`}>
+                                                                                {timeAgo(groupLastRotated[group.name]!)}
+                                                                            </span>
+                                                                        )}
+                                                                    </p>
                                                                 </div>
                                                                 <div className="flex items-center gap-2">
                                                                     <button
@@ -915,7 +1012,7 @@ export default function GroupsPage() {
                                     })}
                                     {!searchTerm && (
                                         <div
-                                            onClick={() => navigate('/groups/new')}
+                                            onClick={() => setShowTypePicker(true)}
                                             className="group flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-slate-700/50 hover:border-primary/40 hover:bg-slate-800/30 transition-all duration-300 cursor-pointer"
                                             style={{ minHeight: '190px' }}
                                         >
@@ -935,7 +1032,7 @@ export default function GroupsPage() {
                 ) : !searchTerm ? (
                     viewMode === "list" ? (
                         <div
-                            onClick={() => navigate('/groups/new')}
+                            onClick={() => setShowTypePicker(true)}
                             className="group flex items-center gap-3 rounded-xl border-2 border-dashed border-slate-700/50 hover:border-primary/40 hover:bg-slate-800/30 px-4 py-3 ml-8 transition-all duration-300 cursor-pointer"
                         >
                             <Plus className="h-4 w-4 text-slate-500 group-hover:text-primary transition-colors shrink-0" />
@@ -947,7 +1044,7 @@ export default function GroupsPage() {
                     ) : (
                         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                             <div
-                                onClick={() => navigate('/groups/new')}
+                                onClick={() => setShowTypePicker(true)}
                                 className="group flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-slate-700/50 hover:border-primary/40 hover:bg-slate-800/30 transition-all duration-300 cursor-pointer"
                                 style={{ minHeight: '190px' }}
                             >
@@ -978,11 +1075,11 @@ export default function GroupsPage() {
                     <SheetHeader>
                         <div className="flex items-center gap-3">
                             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 border border-primary/20">
-                                <LayoutGrid className="h-5 w-5 text-primary" />
+                                <Home className="h-5 w-5 text-primary" />
                             </div>
                             <div>
-                                <SheetTitle>Layout Settings</SheetTitle>
-                                <SheetDescription>Global display configuration</SheetDescription>
+                                <SheetTitle>Homescreen Settings</SheetTitle>
+                                <SheetDescription>Control how collections appear on Plex</SheetDescription>
                             </div>
                         </div>
                         <SheetCloseButton />
@@ -1050,87 +1147,63 @@ export default function GroupsPage() {
                         <hr className="border-slate-700/50" />
 
                         {/* Max Collections */}
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium text-white">Max Collections</label>
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                                <label className="text-sm font-medium text-white">Max Collections</label>
+                                <span className="text-xs font-medium text-slate-300 tabular-nums">
+                                    {rotationSettings?.max_collections ?? 1}
+                                </span>
+                            </div>
                             <p className="text-xs text-slate-400">
                                 Limit the number of collections displayed.
                             </p>
-                            <div className="flex items-center gap-3 mt-2">
-                                <div className="flex items-center rounded-lg border border-slate-700 bg-slate-900 overflow-hidden">
-                                    <button
-                                        type="button"
-                                        disabled={!rotationSettings || rotationSettings.max_collections <= 1}
-                                        onClick={() => {
-                                            setMaxCollectionsInput((prev) => String(Math.max(1, Number(prev) - 1)));
-                                            saveRotationField({ max_collections: (rotationSettings?.max_collections ?? 1) - 1 });
-                                        }}
-                                        className="flex items-center justify-center h-10 w-10 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                        <Minus className="h-4 w-4" />
-                                    </button>
-                                    <input
-                                        type="number"
-                                        min={1}
-                                        value={maxCollectionsInput}
-                                        onChange={(e) => setMaxCollectionsInput(e.target.value)}
-                                        onBlur={() => {
-                                            const val = parseInt(maxCollectionsInput, 10);
-                                            if (!Number.isNaN(val) && val >= 1 && rotationSettings) {
-                                                setMaxCollectionsInput(String(val));
-                                                saveRotationField({ max_collections: val });
-                                            } else {
-                                                // Revert to current value
-                                                setMaxCollectionsInput(String(rotationSettings?.max_collections ?? ""));
-                                            }
-                                        }}
-                                        className="w-12 text-center text-sm font-semibold text-white tabular-nums bg-transparent border-none outline-none focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                    />
-                                    <button
-                                        type="button"
-                                        disabled={!rotationSettings}
-                                        onClick={() => {
-                                            setMaxCollectionsInput((prev) => String(Number(prev) + 1));
-                                            saveRotationField({ max_collections: (rotationSettings?.max_collections ?? 0) + 1 });
-                                        }}
-                                        className="flex items-center justify-center h-10 w-10 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                        <Plus className="h-4 w-4" />
-                                    </button>
-                                </div>
-                                <span className="text-sm text-slate-400">items visible</span>
+                            <Slider
+                                min={1}
+                                max={20}
+                                step={1}
+                                value={[rotationSettings?.max_collections ?? 1]}
+                                onValueChange={([val]) => {
+                                    setMaxCollectionsInput(String(val));
+                                    saveRotationField({ max_collections: val });
+                                }}
+                            />
+                            <div className="flex justify-between text-[10px] text-slate-600">
+                                <span>1</span>
+                                <span>10</span>
+                                <span>20</span>
                             </div>
                         </div>
 
                         <hr className="border-slate-700/50" />
 
-                        {/* Selection Strategy */}
+                        {/* Group Order */}
                         <div className="space-y-2">
-                            <label className="text-sm font-medium text-white">Selection Strategy</label>
+                            <label className="text-sm font-medium text-white">Group Order</label>
                             <p className="text-xs text-slate-400">
-                                Determine how groups are ordered and how collections are picked within each group.
+                                How groups are ordered for processing during rotation.
                             </p>
                             <Listbox
-                                value={rotationSettings?.strategy ?? "random"}
-                                onChange={(val) => saveRotationField({ strategy: val })}
+                                value={rotationSettings?.group_order ?? "display_order"}
+                                onChange={(val) => saveRotationField({ group_order: val })}
                                 disabled={!rotationSettings}
                             >
                                 <div className="relative mt-2">
                                     <Listbox.Button className="flex items-center gap-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 text-sm text-white hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-primary/70 transition-colors">
                                         <span className="flex-1 text-left">
-                                            {rotationSettings?.strategy === "weighted" ? "Weighted" :
-                                             rotationSettings?.strategy === "lru" ? "Least Recently Used" :
-                                             "Random"}
+                                            {rotationSettings?.group_order === "weighted" ? "Weighted" :
+                                             rotationSettings?.group_order === "random" ? "Random" :
+                                             "Display Order"}
                                         </span>
                                         <ChevronDown className="h-4 w-4 text-slate-400" />
                                     </Listbox.Button>
                                     <Listbox.Options className="absolute left-0 z-10 mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 py-1 shadow-lg focus:outline-none">
                                         <Listbox.Option
-                                            value="random"
+                                            value="display_order"
                                             className="cursor-pointer px-3 py-2 text-sm text-white hover:bg-slate-700 data-[selected]:bg-primary data-[selected]:font-semibold flex items-center justify-between"
                                         >
                                             {({ selected }) => (
                                                 <>
-                                                    <span>Random</span>
+                                                    <span>Display Order</span>
                                                     {selected && <Check className="h-4 w-4 text-white" />}
                                                 </>
                                             )}
@@ -1147,12 +1220,12 @@ export default function GroupsPage() {
                                             )}
                                         </Listbox.Option>
                                         <Listbox.Option
-                                            value="lru"
+                                            value="random"
                                             className="cursor-pointer px-3 py-2 text-sm text-white hover:bg-slate-700 data-[selected]:bg-primary data-[selected]:font-semibold flex items-center justify-between"
                                         >
                                             {({ selected }) => (
                                                 <>
-                                                    <span>Least Recently Used</span>
+                                                    <span>Random</span>
                                                     {selected && <Check className="h-4 w-4 text-white" />}
                                                 </>
                                             )}
@@ -1160,59 +1233,26 @@ export default function GroupsPage() {
                                     </Listbox.Options>
                                 </div>
                             </Listbox>
-                            {rotationSettings?.strategy === "random" && (
+                            {rotationSettings?.group_order === "display_order" && (
                                 <div className="flex items-center gap-2.5 rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5">
                                     <Lightbulb className="h-4 w-4 text-slate-300 shrink-0" strokeWidth={1.5} />
-                                    <p className="text-xs text-blue-200">Groups are processed in display order. Collections are picked randomly within each group.</p>
+                                    <p className="text-xs text-blue-200">Groups are processed in the order shown on this page. Drag to reorder.</p>
                                 </div>
                             )}
-                            {rotationSettings?.strategy === "weighted" && (
+                            {rotationSettings?.group_order === "weighted" && (
                                 <div className="flex items-center gap-2.5 rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5">
                                     <Lightbulb className="h-4 w-4 text-slate-300 shrink-0" strokeWidth={1.5} />
-                                    <p className="text-xs text-blue-200">Groups with higher weight are prioritized first. Collections are picked randomly within each group.</p>
+                                    <p className="text-xs text-blue-200">Groups with higher weight are prioritized first.</p>
                                 </div>
                             )}
-                            {rotationSettings?.strategy === "lru" && (
-                                <div className="flex items-center gap-2.5 rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5">
-                                    <Lightbulb className="h-4 w-4 text-slate-300 shrink-0" strokeWidth={1.5} />
-                                    <p className="text-xs text-blue-200">Groups are processed in display order. Collections that haven't been featured recently are picked first.</p>
-                                </div>
-                            )}
-                        </div>
-
-                        <hr className="border-slate-700/50" />
-
-                        {/* Randomize Group Order */}
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-1">
-                                    <label className="text-sm font-medium text-white">Randomize Group Order</label>
-                                    <p className="text-xs text-slate-400">
-                                        Shuffle which groups get priority each rotation so no single group always dominates.
-                                    </p>
-                                </div>
-                                <Switch
-                                    checked={rotationSettings?.randomize_group_order ?? false}
-                                    onChange={(val) => saveRotationField({ randomize_group_order: val })}
-                                    disabled={!rotationSettings}
-                                    className={`${
-                                        rotationSettings?.randomize_group_order ? "bg-primary" : "bg-slate-700"
-                                    } relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary/70 disabled:opacity-60 shrink-0 ml-4`}
-                                >
-                                    <span
-                                        className={`${
-                                            rotationSettings?.randomize_group_order ? "translate-x-6" : "translate-x-1"
-                                        } inline-block h-4 w-4 transform rounded-full bg-white transition-transform`}
-                                    />
-                                </Switch>
-                            </div>
-                            {rotationSettings?.randomize_group_order && (
+                            {rotationSettings?.group_order === "random" && (
                                 <div className="flex items-center gap-2.5 rounded-lg bg-primary/10 border border-primary/20 px-3 py-2.5">
                                     <Shuffle className="h-4 w-4 text-slate-300 shrink-0" strokeWidth={1.5} />
-                                    <p className="text-xs text-blue-200">Group processing order will be shuffled each rotation, overriding display order and weight-based sorting.</p>
+                                    <p className="text-xs text-blue-200">Group processing order is shuffled each rotation so no single group always dominates.</p>
                                 </div>
                             )}
                         </div>
+
                     </SheetBody>
                 </SheetContent>
             </Sheet>
@@ -1232,6 +1272,127 @@ export default function GroupsPage() {
                     setConfirmDelete(null);
                 }}
             />
+
+            {/* Group type picker dialog */}
+            <Dialog open={showTypePicker} onOpenChange={(open) => {
+                setShowTypePicker(open);
+                if (!open) { setNewGroupType(null); setNewGroupName(""); setCreateError(null); }
+            }}>
+                <DialogContent className="max-w-lg">
+                    <DialogHeader>
+                        <div>
+                            <DialogTitle>{newGroupType ? "Name Your Group" : "Create New Group"}</DialogTitle>
+                            <DialogDescription>{newGroupType ? "Give your group a name to get started." : "Choose how this group will manage its collections."}</DialogDescription>
+                        </div>
+                        <DialogCloseButton />
+                    </DialogHeader>
+                    {!newGroupType ? (
+                        <div className="p-6 grid grid-cols-2 gap-4">
+                            <button
+                                type="button"
+                                onClick={() => setNewGroupType("basic")}
+                                className="group flex flex-col items-center gap-3 rounded-xl border-2 border-slate-700/50 bg-slate-800/30 p-6 hover:border-primary/40 hover:bg-primary/5 transition-all duration-200 cursor-pointer"
+                            >
+                                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800 text-slate-400 group-hover:bg-primary/20 group-hover:text-primary transition-all duration-200">
+                                    <Layers className="h-6 w-6" />
+                                </div>
+                                <div className="text-center">
+                                    <p className="text-sm font-semibold text-white">Basic Group</p>
+                                    <p className="text-xs text-slate-400 mt-1">Manually select which collections to include</p>
+                                </div>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setNewGroupType("smart")}
+                                className="group flex flex-col items-center gap-3 rounded-xl border-2 border-slate-700/50 bg-slate-800/30 p-6 hover:border-primary/40 hover:bg-primary/5 transition-all duration-200 cursor-pointer"
+                            >
+                                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800 text-slate-400 group-hover:bg-primary/20 group-hover:text-primary transition-all duration-200">
+                                    <Sparkles className="h-6 w-6" />
+                                </div>
+                                <div className="text-center">
+                                    <p className="text-sm font-semibold text-white">Smart Group</p>
+                                    <p className="text-xs text-slate-400 mt-1">Automatically include collections matching your rules</p>
+                                </div>
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="p-6 space-y-4">
+                            <div className="flex items-center gap-2 text-sm text-slate-400">
+                                {newGroupType === "smart" ? <Sparkles className="h-4 w-4 text-primary" /> : <Layers className="h-4 w-4 text-primary" />}
+                                <span className="capitalize">{newGroupType} Group</span>
+                                <button type="button" onClick={() => { setNewGroupType(null); setNewGroupName(""); setCreateError(null); }} className="ml-auto text-xs text-slate-500 hover:text-slate-300 transition-colors">Change</button>
+                            </div>
+                            <input
+                                autoFocus
+                                type="text"
+                                value={newGroupName}
+                                onChange={(e) => { setNewGroupName(e.target.value); setCreateError(null); }}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter" && newGroupName.trim() && !creatingGroup) {
+                                        e.preventDefault();
+                                        document.getElementById("create-group-btn")?.click();
+                                    }
+                                }}
+                                placeholder="e.g. Horror Collections, Trakt Lists..."
+                                className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary/70 text-sm"
+                            />
+                            {createError && (
+                                <p className="text-sm text-red-400">{createError}</p>
+                            )}
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => { setShowTypePicker(false); setNewGroupType(null); setNewGroupName(""); setCreateError(null); }}
+                                    className="px-4 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    id="create-group-btn"
+                                    type="button"
+                                    disabled={!newGroupName.trim() || creatingGroup}
+                                    onClick={async () => {
+                                        try {
+                                            setCreatingGroup(true);
+                                            setCreateError(null);
+                                            const isSmart = newGroupType === "smart";
+                                            const payload = isSmart
+                                                ? { name: newGroupName.trim(), enabled: true, smart: true, rules: [{ field: "library", operator: "is", values: [] }], min_picks: 0, max_picks: 1, weight: 1, min_gap_rotations: 0, display_order: 0, visibility_home: true, visibility_shared: false, visibility_recommended: false, date_range: null, collections: [] }
+                                                : { name: newGroupName.trim(), enabled: true, min_picks: 0, max_picks: 1, weight: 1, min_gap_rotations: 0, display_order: 0, visibility_home: true, visibility_shared: false, visibility_recommended: false, date_range: null, collections: [] };
+                                            const r = await fetchWithAuth("/api/admin/config/groups", {
+                                                method: "POST",
+                                                headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify(payload),
+                                            });
+                                            if (!r.ok) {
+                                                const text = await r.text();
+                                                throw new Error(text || "Failed to create group");
+                                            }
+                                            const nextGroups = await fetchWithAuth("/api/admin/config/groups").then((res) => res.json());
+                                            const targetIndex = nextGroups.length - 1;
+                                            setShowTypePicker(false);
+                                            setNewGroupType(null);
+                                            setNewGroupName("");
+                                            completeStep("create-group");
+                                            if (targetIndex >= 0) {
+                                                navigate(isSmart ? `/groups/smart/${targetIndex}` : `/groups/${targetIndex}`);
+                                            }
+                                        } catch (e) {
+                                            setCreateError(String(e));
+                                        } finally {
+                                            setCreatingGroup(false);
+                                        }
+                                    }}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white text-sm font-bold shadow-lg shadow-primary/30 hover:shadow-primary/40 transition-all duration-200 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {creatingGroup ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                                    Create Group
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </DialogContent>
+            </Dialog>
 
             {/* Success toast */}
             {message && (

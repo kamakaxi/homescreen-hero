@@ -28,6 +28,9 @@ class RotationRecord(Base):
     # List of collection names featured in this rotation
     featured_collections = Column(JSON, nullable=False)
 
+    # Which group contributed which collections: {"Group A": ["coll1", "coll2"], ...}
+    group_contributions = Column(JSON, nullable=True)
+
 
 class CollectionUsage(Base):
     # Tracks how often each collection has been used and in which rotation
@@ -113,6 +116,9 @@ class LetterboxdMissingItem(Base):
     slug: Mapped[str] = mapped_column(String, nullable=False)
     letterboxd_url: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # TMDb ID resolved via Seerr search (for auto-request)
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Tracking
     first_seen: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.utcnow
@@ -145,6 +151,39 @@ class MDBListMissingItem(Base):
     tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trakt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mdblist_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Tracking
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    last_seen: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    times_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class TMDbMissingItem(Base):
+    __tablename__ = "tmdb_missing_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Which TMDb source this came from
+    source_name: Mapped[str] = mapped_column(String, nullable=False)
+    source_url: Mapped[str] = mapped_column(String, nullable=False)
+
+    # Where we expected to find it in Plex
+    plex_library: Mapped[str] = mapped_column(String, nullable=False)
+    plex_collection: Mapped[str] = mapped_column(String, nullable=False)
+
+    # Movie identity
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # TMDb ID
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Media type (movie or tv)
+    media_type: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Tracking
     first_seen: Mapped[datetime] = mapped_column(
@@ -219,6 +258,43 @@ class MALMissingItem(Base):
     tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     imdb_id: Mapped[str | None] = mapped_column(String, nullable=True)
     tvdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Tracking
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    last_seen: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    times_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class ImportMissingItem(Base):
+    __tablename__ = "import_missing_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Which import this came from
+    import_name: Mapped[str] = mapped_column(String, nullable=False)
+
+    # Where we tried to find it in Plex
+    plex_library: Mapped[str] = mapped_column(String, nullable=False)
+    plex_collection: Mapped[str] = mapped_column(String, nullable=False)
+
+    # Item identity
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    type: Mapped[str] = mapped_column(String, nullable=False, default="movie")
+
+    # External IDs
+    imdb_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tvdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # TV episode/season specifics
+    parent_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    season_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Tracking
     first_seen: Mapped[datetime] = mapped_column(
@@ -323,3 +399,29 @@ class CollectionDisplayOrder(Base):
     collection_name = Column(String, nullable=False, unique=True, index=True)
     display_order = Column(Integer, nullable=False, default=0, index=True)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class SeerrAutoRequest(Base):
+    # Tracks items automatically requested via Seerr to avoid duplicates
+    __tablename__ = "seerr_auto_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # What was requested
+    tmdb_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    media_type: Mapped[str] = mapped_column(String, nullable=False)  # "movie" or "tv"
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Which source first triggered this request
+    integration_type: Mapped[str] = mapped_column(String, nullable=False)  # "trakt", "mdblist", etc.
+    source_name: Mapped[str] = mapped_column(String, nullable=False)
+
+    # Result
+    status: Mapped[str] = mapped_column(String, nullable=False)  # "requested", "already_exists", "failed", "downloaded"
+    error_message: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.utcnow
+    )
+    downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

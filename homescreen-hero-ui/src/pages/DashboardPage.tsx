@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useRef } from "react";
 import { DndContext, rectIntersection, DragOverlay } from "@dnd-kit/core";
-import type { DragEndEvent, DragStartEvent, DragOverEvent } from "@dnd-kit/core";
+import type { DragStartEvent, DragOverEvent } from "@dnd-kit/core";
 import { Lock, Unlock, ChevronDown, Users } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../utils/auth";
@@ -17,10 +17,17 @@ import RotationStatusCard from "../components/RotationStatusCard";
 import RecentRotationsCard from "../components/RecentRotationsCard";
 import IntegrationsHealthCard from "../components/IntegrationsHealthCard";
 import SeerrCarouselCard from "../components/SeerrCarouselCard";
+import AutoRequestActivityCard from "../components/dashboard/AutoRequestActivityCard";
+import RecentlyAddedCard from "../components/RecentlyAddedCard";
+import LibraryCompositionCard from "../components/LibraryCompositionCard";
 import Toast from "../components/Toast";
 import { timeAgo } from "../utils/dates";
 import { fetchWithAuth } from "../utils/api";
 import { useDashboardLayout } from "../hooks/useDashboardLayout";
+import { useTheme } from "../utils/theme";
+import { usePageHeader } from "../utils/pageHeader";
+import { useOnboarding } from "../utils/onboarding";
+import GettingStartedCard from "../components/GettingStartedCard";
 
 type RotationHistoryItem = {
     id: number;
@@ -28,9 +35,10 @@ type RotationHistoryItem = {
     success: boolean;
     error_message?: string | null;
     featured_collections: string[];
+    group_contributions?: Record<string, string[]> | null;
 };
 
-type HealthComponent = { ok: boolean; error?: string;[k: string]: any };
+type HealthComponent = { ok: boolean; error?: string;[k: string]: unknown };
 
 type RotationExecution = {
     rotation: {
@@ -73,6 +81,8 @@ type HealthCache = {
 };
 
 export default function Dashboard() {
+    const { accent } = useTheme();
+    const { setHeader, clearHeader } = usePageHeader();
     const [health, setHealth] = useState<HealthMap>({});
     const [healthLoading, setHealthLoading] = useState(true);
     const [history, setHistory] = useState<RotationHistoryItem[]>([]);
@@ -101,6 +111,7 @@ export default function Dashboard() {
 
     const navigate = useNavigate();
     const { authMethod } = useAuth();
+    const { completeStep } = useOnboarding();
 
     // Dashboard layout customization
     const {
@@ -113,7 +124,14 @@ export default function Dashboard() {
         toggleEditMode,
         reorderStatusBarWidgets,
         reorderMainWidgets,
+        cycleWidgetSize,
+        getEffectiveColSpan,
     } = useDashboardLayout({ tautulli: tautulliEnabled, seerr: seerrEnabled });
+
+    const handleToggleEditMode = () => {
+        if (!isEditMode) completeStep("customize-dashboard");
+        toggleEditMode();
+    };
 
     // Compute hidden widgets for the "Add Widget" dropdown
     const hiddenWidgets = useMemo(() => {
@@ -124,6 +142,7 @@ export default function Dashboard() {
                 name: widget.name,
                 description: widget.description,
                 available: isWidgetAvailable(widget.id),
+                requiresIntegration: widget.requiresIntegration,
             }));
     }, [visibilityMap, isWidgetAvailable]);
 
@@ -159,16 +178,17 @@ export default function Dashboard() {
     };
 
     // Handle drag end - just clear the active state
-    const handleDragEnd = (_event: DragEndEvent) => {
+    const handleDragEnd = () => {
         setActiveId(null);
     };
 
     const plex = health.plex;
+    const plexDetails = plex?.details as { server_name?: string; libraries?: unknown[]; enabled_count?: number } | undefined;
 
-    const plexServerName = plex?.details?.server_name ?? plex?.server_name ?? "Plex";
-    const plexLibraries = plex?.details?.libraries;
+    const plexServerName = plexDetails?.server_name ?? "Plex";
+    const plexLibraries = plexDetails?.libraries;
     const plexLibraryInfo = plexLibraries
-        ? `${plex?.details?.enabled_count ?? plexLibraries.length} ${plexLibraries.length === 1 ? 'library' : 'libraries'}`
+        ? `${plexDetails?.enabled_count ?? plexLibraries.length} ${plexLibraries.length === 1 ? 'library' : 'libraries'}`
         : null;
     const plexDetail = [plexServerName, plexLibraryInfo]
         .filter((value): value is string => Boolean(value))
@@ -376,6 +396,7 @@ export default function Dashboard() {
             summary,
             error_message: record.error_message,
             featured_collections: featured_collections ?? [],
+            group_contributions: record.group_contributions ?? null,
         };
     });
 
@@ -437,6 +458,7 @@ export default function Dashboard() {
                 type: "success"
             });
 
+            completeStep("run-rotation");
             refresh();
             void loadActiveCollections();
         } catch (e) {
@@ -497,7 +519,21 @@ export default function Dashboard() {
                                     : plex?.error ?? "Connection failed"
                         }
                         icon={
-                            <img src="/plex_icon_white.png" alt="Plex" className="w-12 h-12 object-contain" />
+                            <div
+                                aria-label="Plex"
+                                className="w-12 h-12"
+                                style={{
+                                    maskImage: "url(/plex_icon_white.png)",
+                                    WebkitMaskImage: "url(/plex_icon_white.png)",
+                                    maskSize: "contain",
+                                    WebkitMaskSize: "contain",
+                                    maskRepeat: "no-repeat",
+                                    WebkitMaskRepeat: "no-repeat",
+                                    maskPosition: "center",
+                                    WebkitMaskPosition: "center",
+                                    backgroundColor: accent === "plex-orange" ? "#e5a00d" : "white",
+                                }}
+                            />
                         }
                     />
                 );
@@ -531,14 +567,85 @@ export default function Dashboard() {
                         lastRun={lastRun}
                         loading={historyLoading}
                         formatTimeAgo={timeAgo}
+                        compact={getEffectiveColSpan("recent-rotations") === 1}
                     />
                 );
             case "seerr-carousel":
                 return <SeerrCarouselCard key={widgetId} loading={healthLoading} />;
+            case "auto-request-activity":
+                return <AutoRequestActivityCard key={widgetId} />;
+            case "library-composition":
+                return <LibraryCompositionCard key={widgetId} loading={healthLoading} />;
+            case "recently-added":
+                return <RecentlyAddedCard key={widgetId} loading={healthLoading} />;
             default:
                 return null;
         }
     };
+
+    // Push title + action buttons into the TopBar (plex theme only - no-op otherwise)
+    useEffect(() => {
+        if (accent !== "plex-orange") return;
+
+        setHeader({
+            title: "System Overview",
+            actions: (
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={handleToggleEditMode}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all duration-200 active:scale-95 ${
+                            isEditMode
+                                ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
+                                : "border-slate-700 hover:bg-slate-800 hover:border-slate-600 text-slate-300"
+                        }`}
+                        title={isEditMode ? "Lock dashboard" : "Edit layout"}
+                    >
+                        {isEditMode ? <Unlock size={16} /> : <Lock size={16} />}
+                    </button>
+
+                    <button
+                        onClick={syncAllLists}
+                        disabled={busy !== null}
+                        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 hover:bg-slate-800 hover:border-slate-600 text-slate-300 text-sm font-medium transition-all duration-200 active:scale-95 disabled:opacity-60"
+                    >
+                        {busy === "sync" ? "Syncing…" : "Sync Lists"}
+                    </button>
+
+                    <div className="relative" ref={rotationDropdownRef}>
+                        <div className="flex">
+                            <button
+                                onClick={forceRunRotation}
+                                disabled={busy !== null}
+                                className="flex items-center gap-2 px-3 py-2 rounded-l-lg bg-primary hover:bg-primary-hover text-white shadow-lg shadow-primary/30 text-sm font-bold transition-all duration-200 active:scale-95 disabled:opacity-60"
+                            >
+                                {busy === "apply" ? "Running…" : "Run Rotation"}
+                            </button>
+                            <button
+                                onClick={() => setRotationDropdownOpen(!rotationDropdownOpen)}
+                                disabled={busy !== null}
+                                className="flex items-center px-2 py-2 rounded-r-lg bg-primary hover:bg-primary-hover text-white shadow-lg shadow-primary/30 border-l border-primary-hover/30 transition-all duration-200 active:scale-95 disabled:opacity-60"
+                            >
+                                <ChevronDown size={14} className={`transition-transform ${rotationDropdownOpen ? "rotate-180" : ""}`} />
+                            </button>
+                        </div>
+                        {rotationDropdownOpen && (
+                            <div className="absolute right-0 top-full mt-2 w-48 rounded-lg bg-slate-800 border border-slate-700 shadow-xl z-50 overflow-hidden">
+                                <button
+                                    onClick={() => { simulateRotation(); setRotationDropdownOpen(false); }}
+                                    disabled={busy !== null}
+                                    className="w-full px-4 py-2.5 text-left text-sm text-slate-200 hover:bg-slate-700/50 transition-colors disabled:opacity-60"
+                                >
+                                    {busy === "simulate" ? "Simulating…" : "Simulate Rotation"}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            ),
+        });
+        return clearHeader;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [accent, busy, isEditMode, rotationDropdownOpen]);
 
     return (
         <>
@@ -564,9 +671,9 @@ export default function Dashboard() {
                         <div className="p-4 space-y-6 max-h-[70vh] overflow-y-auto scrollbar-hover-only">
                             <div>
                                 <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">Selected Collections</h4>
-                                {simulation.rotation.selected_collections.length ? (
+                                {simulation.applied_collections.length ? (
                                     <ul className="list-disc list-inside text-slate-700 dark:text-slate-200 space-y-1">
-                                        {simulation.rotation.selected_collections.map((name) => (
+                                        {simulation.applied_collections.map((name) => (
                                             <li key={name}>{name}</li>
                                         ))}
                                     </ul>
@@ -662,7 +769,7 @@ export default function Dashboard() {
                                 Close
                             </button>
                             <button
-                                className="px-4 py-2 rounded-lg bg-primary hover:bg-blue-600 text-white text-sm font-bold shadow-lg shadow-primary/30 hover:shadow-primary/40 transition-all duration-200 active:scale-95 disabled:opacity-60"
+                                className="px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white text-sm font-bold shadow-lg shadow-primary/30 hover:shadow-primary/40 transition-all duration-200 active:scale-95 disabled:opacity-60"
                                 onClick={applySimulation}
                                 disabled={busy !== null}
                             >
@@ -674,71 +781,69 @@ export default function Dashboard() {
             ) : null}
 
             <div className="max-w-8xl mx-auto flex flex-col gap-4">
-                {/* Header */}
-                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                    <div className="flex flex-col gap-1.5">
-                        <h2 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">System Overview</h2>
-                        <p className="text-slate-500 dark:text-slate-400 text-sm">
-                            Monitor rotation status, history, and collection usage.
-                        </p>
-                    </div>
+                {/* In the default theme, show the page header inline since there's no sidebar TopBar */}
+                {accent !== "plex-orange" && (
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <div className="flex flex-col gap-1.5">
+                            <h2 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">System Overview</h2>
+                            <p className="text-slate-500 dark:text-slate-400 text-sm">
+                                Monitor rotation status, history, and collection usage.
+                            </p>
+                        </div>
 
-                    <div className="flex gap-3 flex-wrap">
-                        <button
-                            onClick={toggleEditMode}
-                            className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all duration-200 active:scale-95 ${
-                                isEditMode
-                                    ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
-                                    : "border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-slate-400 dark:hover:border-slate-600 text-slate-700 dark:text-slate-300"
-                            }`}
-                            title={isEditMode ? "Lock dashboard" : "Edit layout"}
-                        >
-                            {isEditMode ? <Unlock size={18} /> : <Lock size={18} />}
-                        </button>
+                        <div className="flex gap-3 flex-wrap">
+                            <button
+                                onClick={handleToggleEditMode}
+                                className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all duration-200 active:scale-95 ${
+                                    isEditMode
+                                        ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
+                                        : "border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-slate-400 dark:hover:border-slate-600 text-slate-700 dark:text-slate-300"
+                                }`}
+                                title={isEditMode ? "Lock dashboard" : "Edit layout"}
+                            >
+                                {isEditMode ? <Unlock size={18} /> : <Lock size={18} />}
+                            </button>
 
-                        <button
-                            onClick={syncAllLists}
-                            disabled={busy !== null}
-                            className="flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-slate-400 dark:hover:border-slate-600 text-slate-700 dark:text-slate-300 text-sm font-medium transition-all duration-200 active:scale-95 disabled:opacity-60"
-                        >
-                            {busy === "sync" ? "Syncing…" : "Sync All Lists"}
-                        </button>
+                            <button
+                                onClick={syncAllLists}
+                                disabled={busy !== null}
+                                className="flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 hover:border-slate-400 dark:hover:border-slate-600 text-slate-700 dark:text-slate-300 text-sm font-medium transition-all duration-200 active:scale-95 disabled:opacity-60"
+                            >
+                                {busy === "sync" ? "Syncing…" : "Sync All Lists"}
+                            </button>
 
-                        {/* Split button for Run Rotation */}
-                        <div className="relative" ref={rotationDropdownRef}>
-                            <div className="flex">
-                                <button
-                                    onClick={forceRunRotation}
-                                    disabled={busy !== null}
-                                    className="flex items-center gap-2 px-4 py-2 rounded-l-lg bg-primary hover:bg-blue-600 text-white shadow-lg shadow-primary/30 hover:shadow-primary/40 text-sm font-bold transition-all duration-200 active:scale-95 disabled:opacity-60"
-                                >
-                                    {busy === "apply" ? "Running…" : "Run Rotation Now"}
-                                </button>
-                                <button
-                                    onClick={() => setRotationDropdownOpen(!rotationDropdownOpen)}
-                                    disabled={busy !== null}
-                                    className="flex items-center px-2 py-2 rounded-r-lg bg-primary hover:bg-blue-600 text-white shadow-lg shadow-primary/30 hover:shadow-primary/40 border-l border-blue-400/30 transition-all duration-200 active:scale-95 disabled:opacity-60"
-                                >
-                                    <ChevronDown size={16} className={`transition-transform ${rotationDropdownOpen ? "rotate-180" : ""}`} />
-                                </button>
-                            </div>
-                            {rotationDropdownOpen && (
-                                <div className="absolute right-0 top-full mt-2 w-48 rounded-lg bg-slate-800 border border-slate-700 shadow-xl z-50 overflow-hidden">
+                            <div className="relative" ref={rotationDropdownRef}>
+                                <div className="flex">
                                     <button
-                                        onClick={() => {
-                                            simulateRotation();
-                                            setRotationDropdownOpen(false);
-                                        }}
+                                        onClick={forceRunRotation}
                                         disabled={busy !== null}
-                                        className="w-full px-4 py-2.5 text-left text-sm text-slate-200 hover:bg-slate-700/50 transition-colors disabled:opacity-60"
+                                        className="flex items-center gap-2 px-4 py-2 rounded-l-lg bg-primary hover:bg-primary-hover text-white shadow-lg shadow-primary/30 hover:shadow-primary/40 text-sm font-bold transition-all duration-200 active:scale-95 disabled:opacity-60"
                                     >
-                                        {busy === "simulate" ? "Simulating…" : "Simulate Rotation"}
+                                        {busy === "apply" ? "Running…" : "Run Rotation Now"}
+                                    </button>
+                                    <button
+                                        onClick={() => setRotationDropdownOpen(!rotationDropdownOpen)}
+                                        disabled={busy !== null}
+                                        className="flex items-center px-2 py-2 rounded-r-lg bg-primary hover:bg-primary-hover text-white shadow-lg shadow-primary/30 hover:shadow-primary/40 border-l border-primary-hover/30 transition-all duration-200 active:scale-95 disabled:opacity-60"
+                                    >
+                                        <ChevronDown size={16} className={`transition-transform ${rotationDropdownOpen ? "rotate-180" : ""}`} />
                                     </button>
                                 </div>
-                            )}
+                                {rotationDropdownOpen && (
+                                    <div className="absolute right-0 top-full mt-2 w-48 rounded-lg bg-slate-800 border border-slate-700 shadow-xl z-50 overflow-hidden">
+                                        <button
+                                            onClick={() => { simulateRotation(); setRotationDropdownOpen(false); }}
+                                            disabled={busy !== null}
+                                            className="w-full px-4 py-2.5 text-left text-sm text-slate-200 hover:bg-slate-700/50 transition-colors disabled:opacity-60"
+                                        >
+                                            {busy === "simulate" ? "Simulating…" : "Simulate Rotation"}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
-                </div>
+                )}
 
                 {/* Pending user approvals banner */}
                 {pendingUserCount > 0 && (
@@ -756,6 +861,12 @@ export default function Dashboard() {
                         </span>
                     </button>
                 )}
+
+                {/* Getting Started onboarding checklist */}
+                <GettingStartedCard
+                    onRunRotation={forceRunRotation}
+                    onToggleEditMode={handleToggleEditMode}
+                />
 
                 {/* Errors */}
                 {error ? (
@@ -800,17 +911,22 @@ export default function Dashboard() {
                     {visibleMainWidgets.length > 0 && (
                         <DroppableSection id="main" items={visibleMainWidgets}>
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                                {visibleMainWidgets.map((widgetId) => (
-                                    <DraggableWidget
-                                        key={widgetId}
-                                        id={widgetId}
-                                        isEditMode={isEditMode}
-                                        colSpan={widgetRegistry[widgetId]?.colSpan}
-                                        onHide={() => toggleVisibility(widgetId)}
-                                    >
-                                        {renderWidget(widgetId)}
-                                    </DraggableWidget>
-                                ))}
+                                {visibleMainWidgets.map((widgetId) => {
+                                    const def = widgetRegistry[widgetId];
+                                    return (
+                                        <DraggableWidget
+                                            key={widgetId}
+                                            id={widgetId}
+                                            isEditMode={isEditMode}
+                                            colSpan={getEffectiveColSpan(widgetId)}
+                                            isResizable={!!def?.allowedColSpans && def.allowedColSpans.length > 1}
+                                            onResize={() => cycleWidgetSize(widgetId)}
+                                            onHide={() => toggleVisibility(widgetId)}
+                                        >
+                                            {renderWidget(widgetId)}
+                                        </DraggableWidget>
+                                    );
+                                })}
                             </div>
                         </DroppableSection>
                     )}

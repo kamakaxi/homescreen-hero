@@ -10,6 +10,7 @@ from .integrations import (
     sync_all_trakt_sources,
     sync_all_letterboxd_sources,
     sync_all_mdblist_sources,
+    sync_all_tmdb_sources,
     sync_all_anilist_sources,
     sync_all_mal_sources,
     apply_home_screen_selection,
@@ -17,7 +18,8 @@ from .integrations import (
 from .integrations.plex_client import get_library_collections
 from .config.loader import load_config
 from .config.schema import AppConfig, RotationExecution, RotationResult
-from .rotation import run_rotation_with_history, run_auto_rotation_with_history, build_collection_visibility_map
+from .rotation import run_rotation_with_history, run_auto_rotation_with_history, build_collection_visibility_map, build_collection_sort_map
+from .smart_groups import build_collection_metadata, resolve_smart_rules
 from .db import (
     init_db,
     get_last_rotation_collections,
@@ -46,6 +48,23 @@ def _build_collection_library_map(server, config: AppConfig) -> Dict[str, str]:
             except Exception as e:
                 logger.warning("Failed to get collections from library '%s': %s", lib_config.name, e)
     return coll_to_lib
+
+
+def _resolve_smart_groups(server, config: AppConfig) -> Dict[str, List[str]]:
+    # Resolve all smart groups into concrete collection name lists.
+    # Returns a dict mapping group name -> resolved collection names.
+    smart_groups = [g for g in config.groups if g.smart]
+    if not smart_groups:
+        return {}
+
+    logger.info("Resolving %d smart group(s)", len(smart_groups))
+    metadata = build_collection_metadata(server, config)
+    result = {}
+    for group in smart_groups:
+        resolved = resolve_smart_rules(group.rules, metadata)
+        result[group.name] = resolved
+        logger.info("Smart group '%s' resolved to %d collections", group.name, len(resolved))
+    return result
 
 
 def _run_auto_rotation(
@@ -97,7 +116,8 @@ def _run_auto_rotation(
     return run_auto_rotation_with_history(
         all_collection_names,
         max_collections=config.rotation.max_collections,
-        strategy=config.rotation.strategy,
+        # Auto-rotate has no groups, so collection selection is always random.
+        collection_selection="random",
         blacklisted_collections=config.rotation.blacklisted_collections,
         allow_repeats=config.rotation.allow_repeats,
         last_rotation_collections=last_rotation_collections,
@@ -119,6 +139,7 @@ def _sync_selected_collections(
     from .integrations.trakt_sync import sync_single_trakt_source
     from .integrations.letterboxd_sync import sync_single_letterboxd_source
     from .integrations.mdblist_sync import sync_single_mdblist_source
+    from .integrations.tmdb_sync import sync_single_tmdb_source
     from .integrations.anilist_sync import sync_single_anilist_source
     from .integrations.mal_sync import sync_single_mal_source
     from .db import record_sync_result
@@ -127,6 +148,7 @@ def _sync_selected_collections(
     trakt_sources = {}
     letterboxd_sources = {}
     mdblist_sources = {}
+    tmdb_sources = {}
     anilist_sources = {}
     mal_sources = {}
 
@@ -141,6 +163,10 @@ def _sync_selected_collections(
     if config.mdblist and config.mdblist.enabled:
         for source in config.mdblist.sources:
             mdblist_sources[source.name] = source
+
+    if config.tmdb and config.tmdb.enabled:
+        for source in config.tmdb.sources:
+            tmdb_sources[source.name] = source
 
     if config.anilist and config.anilist.sources:
         for source in config.anilist.sources:
@@ -183,6 +209,9 @@ def _sync_selected_collections(
         elif collection_name in mdblist_sources:
             logger.info(f"Syncing selected MDBList collection: {collection_name}")
             _sync_and_record("mdblist", mdblist_sources[collection_name], sync_single_mdblist_source)
+        elif collection_name in tmdb_sources:
+            logger.info(f"Syncing selected TMDb collection: {collection_name}")
+            _sync_and_record("tmdb", tmdb_sources[collection_name], sync_single_tmdb_source)
         elif collection_name in anilist_sources:
             logger.info(f"Syncing selected AniList collection: {collection_name}")
             _sync_and_record("anilist", anilist_sources[collection_name], sync_single_anilist_source)
@@ -217,11 +246,8 @@ def run_rotation_once(
     # Build collection→library map for per-library limits
     collection_library_map = _build_collection_library_map(server, config)
 
-    # DISABLED: Auto-cleanup was too aggressive and deleting user's collections
-    # TODO: Redesign cleanup to only delete collections that HSH created (not native Plex collections)
-    # cleanup_result = cleanup_deleted_integration_sources(server, config)
-    # if cleanup_result['deleted_from_plex']:
-    #     logger.info(f"Cleaned up {len(cleanup_result['deleted_from_plex'])} deleted integration sources from Plex")
+    # Resolve smart groups into concrete collection lists
+    smart_group_collections = _resolve_smart_groups(server, config)
 
     # Check if auto-rotate mode is enabled
     use_auto_rotate = config.rotation.auto_rotate.enabled
@@ -243,6 +269,10 @@ def run_rotation_once(
             sync_all_mdblist_sources(server, config)
         except Exception as e:
             logger.error("MDBList sync failed, continuing with rotation: %s", e)
+        try:
+            sync_all_tmdb_sources(server, config)
+        except Exception as e:
+            logger.error("TMDb sync failed, continuing with rotation: %s", e)
         try:
             sync_all_anilist_sources(server, config)
         except Exception as e:
@@ -271,6 +301,7 @@ def run_rotation_once(
                 last_rotation_collections=last_rotation_collections,
                 pinned_names=pinned_names,
                 collection_library_map=collection_library_map,
+                smart_group_collections=smart_group_collections,
             )
 
         # Now sync only the selected collections
@@ -294,6 +325,7 @@ def run_rotation_once(
                 usage_map=usage_map,
                 last_rotation_collections=last_rotation_collections,
                 pinned_names=pinned_names,
+                smart_group_collections=smart_group_collections,
                 collection_library_map=collection_library_map,
             )
 
@@ -311,12 +343,15 @@ def run_rotation_once(
             for name in rotation_result.selected_collections
         }
     else:
-        collection_visibility = build_collection_visibility_map(config)
+        collection_visibility = build_collection_visibility_map(config, smart_group_collections)
 
     # Add pinned collection visibility (overrides group settings for pinned collections)
     from .db import get_pinned_visibility_map
     pinned_visibility = get_pinned_visibility_map()
     collection_visibility.update(pinned_visibility)
+
+    # Build sort map from group settings
+    collection_sort = build_collection_sort_map(config, smart_group_collections)
 
     # Apply the selection (or simulate if dry_run=True)
     applied = apply_home_screen_selection(
@@ -325,12 +360,31 @@ def run_rotation_once(
         rotation_result.selected_collections,
         collection_visibility,
         dry_run=dry_run,  # controls whether Plex is actually changed
+        smart_group_collections=smart_group_collections,
+        collection_sort=collection_sort,
     )
+
+    # Apply per-user targeting labels and sync filter settings
+    if not dry_run:
+        try:
+            from .user_targeting import apply_rotation_targeting, sync_all_user_filters
+            apply_rotation_targeting(server, config, applied, smart_group_collections)
+            # Sync user filter settings so Plex actually hides labeled collections
+            sync_all_user_filters(config)
+        except Exception as e:
+            logger.error("Failed to apply user targeting: %s", e, exc_info=True)
+
+    group_contributions = {
+        g.group_name: g.chosen_collections
+        for g in rotation_result.groups
+        if g.chosen_collections
+    }
 
     rotation_id = record_rotation(
         rotation_result.selected_collections,
         success=True,
         error_message=None,
+        group_contributions=group_contributions or None,
     )
 
     # Collect analytics after rotation if Tautulli is enabled
@@ -369,11 +423,7 @@ def run_rotation_once(
 def simulate_rotation_once(
     config: Optional[AppConfig] = None,
 ) -> RotationExecution:
-    # Pure simulation:
-    #   - Uses current history to respect min_gap_rotations
-    #   - DOES NOT modify Plex
-    #   - DOES NOT write to rotation history
-    #   - DOES persist a PendingSimulation so it can be applied later
+    # Simulation only, doesn't actualy write/set anything on Plex
     if config is None:
         config = load_config()
 
@@ -386,6 +436,9 @@ def simulate_rotation_once(
     pinned_names = get_pinned_collection_names()
     server = get_plex_server(config)
     collection_library_map = _build_collection_library_map(server, config)
+
+    # Resolve smart groups into concrete collection lists
+    smart_group_collections = _resolve_smart_groups(server, config)
 
     # Check if auto-rotate mode is enabled
     if config.rotation.auto_rotate.enabled:
@@ -401,6 +454,7 @@ def simulate_rotation_once(
             last_rotation_collections=last_rotation_collections,
             pinned_names=pinned_names,
             collection_library_map=collection_library_map,
+            smart_group_collections=smart_group_collections,
         )
 
     simulation_id = create_simulation(rotation_result)
@@ -411,9 +465,51 @@ def simulate_rotation_once(
         rotation_result.selected_collections,
     )
 
+    # Apply display ordering so simulation preview matches actual rotation order
+    from .rotation import order_collections_for_display
+    from .db import get_pinned_collections
+    pinned_collections = get_pinned_collections()
+    pinned_order = {p.collection_name: p.display_order for p in pinned_collections}
+    ordered = order_collections_for_display(
+        list(rotation_result.selected_collections),
+        config,
+        pinned_names=pinned_names,
+        pinned_order=pinned_order,
+        smart_group_collections=smart_group_collections,
+    )
+
+    # Sort chosen_collections per group to match display ordering
+    group_cfg_map = {g.name: g for g in config.groups}
+    for group_result in rotation_result.groups:
+        gcfg = group_cfg_map.get(group_result.group_name)
+        if not gcfg or not group_result.chosen_collections:
+            continue
+        if gcfg.collection_order == "alpha":
+            group_result.chosen_collections = sorted(group_result.chosen_collections)
+        elif gcfg.collection_order == "custom" and not gcfg.smart:
+            coll_list = gcfg.collections
+            group_result.chosen_collections = sorted(
+                group_result.chosen_collections,
+                key=lambda c: coll_list.index(c) if c in coll_list else len(coll_list),
+            )
+
+    # Group by library to match how Plex displays collections per-library section
+    enabled_libraries = [lib.name for lib in config.plex.libraries if lib.enabled]
+    library_grouped: list[str] = []
+    used = set()
+    for lib_name in enabled_libraries:
+        for name in ordered:
+            if name not in used and collection_library_map.get(name) == lib_name:
+                library_grouped.append(name)
+                used.add(name)
+    # Append any collections not found in a library (e.g. TV collections with only Movies enabled)
+    for name in ordered:
+        if name not in used:
+            library_grouped.append(name)
+
     execution = RotationExecution(
         rotation=rotation_result,
-        applied_collections=list(rotation_result.selected_collections),
+        applied_collections=library_grouped,
         dry_run=True,
         simulation_id=simulation_id,
     )
@@ -434,17 +530,11 @@ def sync_all_sources(config: Optional[AppConfig] = None) -> Dict[str, int]:
     # Connect to Plex
     server = get_plex_server(config)
 
-    # DISABLED: Auto-cleanup was too aggressive and could delete collections
-    # managed by other tools (e.g. Kometa). Same issue as the rotation path.
-    # TODO: Redesign cleanup to only delete collections that HSH created
-    # cleanup_result = cleanup_deleted_integration_sources(server, config)
-    # if cleanup_result['deleted_from_plex']:
-    #     logger.info(f"Cleaned up {len(cleanup_result['deleted_from_plex'])} deleted integration sources from Plex")
-
     # Sync all sources
     sync_all_trakt_sources(server, config)
     sync_all_letterboxd_sources(server, config)
     sync_all_mdblist_sources(server, config)
+    sync_all_tmdb_sources(server, config)
     sync_all_anilist_sources(server, config)
     sync_all_mal_sources(server, config)
 
@@ -488,6 +578,9 @@ def apply_simulation(
     # Apply collections to Plex
     server = get_plex_server(config)
 
+    # Resolve smart groups for visibility mapping
+    smart_group_collections = _resolve_smart_groups(server, config)
+
     # Build visibility map (auto-rotate uses its own settings)
     if config.rotation.auto_rotate.enabled:
         auto_rotate = config.rotation.auto_rotate
@@ -501,7 +594,7 @@ def apply_simulation(
             for name in rotation_result.selected_collections
         }
     else:
-        collection_visibility = build_collection_visibility_map(config)
+        collection_visibility = build_collection_visibility_map(config, smart_group_collections)
 
     # Add pinned collection visibility (overrides group settings for pinned collections)
     from .db import get_pinned_visibility_map
@@ -514,13 +607,28 @@ def apply_simulation(
         rotation_result.selected_collections,
         collection_visibility,
         dry_run=False,
+        smart_group_collections=smart_group_collections,
     )
 
+    # Apply per-user targeting labels and sync filter settings
+    try:
+        from .user_targeting import apply_rotation_targeting, sync_all_user_filters
+        apply_rotation_targeting(server, config, applied, smart_group_collections)
+        sync_all_user_filters(config)
+    except Exception as e:
+        logger.error("Failed to apply user targeting: %s", e, exc_info=True)
+
     # Record in db as a real rotation in history
+    sim_group_contributions = {
+        g.group_name: g.chosen_collections
+        for g in rotation_result.groups
+        if g.chosen_collections
+    }
     record_rotation(
         rotation_result.selected_collections,
         success=True,
         error_message=None,
+        group_contributions=sim_group_contributions or None,
     )
 
     # Mark simulation as applied

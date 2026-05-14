@@ -16,6 +16,7 @@ from homescreen_hero.core.config.schema import (
     TraktSettings,
     LetterboxdSettings,
     MDBListSettings,
+    TMDbSettings,
     AniListSettings,
     MALSettings,
     TautulliSettings,
@@ -32,6 +33,7 @@ from .schemas import (
     TraktConfigSaveRequest,
     LetterboxdConfigSaveRequest,
     MDBListConfigSaveRequest,
+    TMDbConfigSaveRequest,
     AniListConfigSaveRequest,
     MALConfigSaveRequest,
     TautulliConfigSaveRequest,
@@ -117,7 +119,11 @@ def get_trakt_settings(_current_user: CurrentUser = Depends(require_admin)) -> T
     # Return the currently configured Trakt settings
     try:
         config = load_config()
-        return config.trakt
+        if config.trakt:
+            return config.trakt
+        # Auto-enable if the user provided an env var
+        env_key = os.getenv("HSH_TRAKT_CLIENT_ID") or None
+        return TraktSettings(enabled=bool(env_key), client_id=env_key)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive
@@ -226,7 +232,8 @@ def get_mdblist_settings(_current_user: CurrentUser = Depends(require_admin)) ->
     try:
         config = load_config()
         if config.mdblist is None:
-            return MDBListSettings(enabled=False, api_key=None, base_url="https://api.mdblist.com", sources=[])
+            env_key = os.getenv("HSH_MDBLIST_API_KEY") or None
+            return MDBListSettings(enabled=bool(env_key), api_key=env_key, base_url="https://api.mdblist.com", sources=[])
         return config.mdblist
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -269,6 +276,67 @@ def save_mdblist_settings(
             path=str(config_path),
             env_override=CONFIG_ENV_VAR in os.environ,
             message="MDBList settings saved and validated.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ========================================================================
+# TMDB SETTINGS
+# ========================================================================
+
+@router.get("/tmdb", response_model=TMDbSettings)
+def get_tmdb_settings(_current_user: CurrentUser = Depends(require_admin)) -> TMDbSettings:
+    # Return the currently configured TMDb settings
+    try:
+        config = load_config()
+        if config.tmdb is None:
+            env_key = os.getenv("HSH_TMDB_API_KEY") or None
+            return TMDbSettings(enabled=bool(env_key), api_key=env_key, base_url="https://api.themoviedb.org/3", sources=[])
+        return config.tmdb
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/tmdb", response_model=ConfigSaveResponse)
+def save_tmdb_settings(
+    payload: TMDbConfigSaveRequest,
+    _current_user: CurrentUser = Depends(require_admin)
+) -> ConfigSaveResponse:
+    # Update only TMDb settings in config.yaml while preserving other keys
+    try:
+        data = load_config_mapping()
+
+        tmdb_section = data.get("tmdb") if isinstance(data.get("tmdb"), dict) else {}
+        tmdb_section = dict(tmdb_section)
+
+        # Only save api_key to config if it's not coming from environment variable
+        api_key_from_env = os.getenv("HSH_TMDB_API_KEY")
+        if api_key_from_env:
+            tmdb_section.pop("api_key", None)
+        else:
+            tmdb_section["api_key"] = payload.api_key
+
+        tmdb_section.update(
+            enabled=payload.enabled,
+            base_url=payload.base_url,
+        )
+
+        data["tmdb"] = tmdb_section
+        save_config_mapping(data)
+
+        config_path = get_config_path()
+        return ConfigSaveResponse(
+            ok=True,
+            path=str(config_path),
+            env_override=CONFIG_ENV_VAR in os.environ,
+            message="TMDb settings saved and validated.",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -338,7 +406,8 @@ def get_mal_settings(_current_user: CurrentUser = Depends(require_admin)) -> MAL
     try:
         config = load_config()
         if config.mal is None:
-            return MALSettings(enabled=False, client_id=None, sources=[])
+            env_key = os.getenv("HSH_MAL_CLIENT_ID") or None
+            return MALSettings(enabled=bool(env_key), client_id=env_key, sources=[])
         return config.mal
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -399,10 +468,12 @@ def get_tautulli_settings(_current_user: CurrentUser = Depends(require_admin)) -
     try:
         config = load_config()
         if config.tautulli is None:
+            env_key = os.getenv("HSH_TAUTULLI_API_KEY") or None
+            env_url = os.getenv("HSH_TAUTULLI_BASE_URL") or "http://localhost:8181"
             return TautulliSettings(
-                enabled=False,
-                api_key=None,
-                base_url="http://localhost:8181",
+                enabled=bool(env_key),
+                api_key=env_key,
+                base_url=env_url,
                 collect_on_rotation=True,
                 collect_interval_hours=24,
             )
@@ -469,10 +540,12 @@ def get_seerr_settings(_current_user: CurrentUser = Depends(require_admin)) -> S
     try:
         config = load_config()
         if config.seerr is None:
+            env_key = os.getenv("HSH_SEERR_API_KEY") or None
+            env_url = os.getenv("HSH_SEERR_BASE_URL") or "http://localhost:5055"
             return SeerrSettings(
-                enabled=False,
-                api_key=None,
-                base_url="http://localhost:5055",
+                enabled=bool(env_key),
+                api_key=env_key,
+                base_url=env_url,
             )
         return config.seerr
     except FileNotFoundError as exc:
@@ -559,14 +632,18 @@ def save_rotation_settings(
             enabled=payload.enabled,
             interval_hours=payload.interval_hours,
             max_collections=payload.max_collections,
-            strategy=payload.strategy,
+            group_order=payload.group_order,
             allow_repeats=payload.allow_repeats,
             sync_all_on_rotation=payload.sync_all_on_rotation,
             blacklisted_collections=payload.blacklisted_collections,
             auto_rotate=payload.auto_rotate.model_dump(),
-            randomize_group_order=payload.randomize_group_order,
             per_library_limits=payload.per_library_limits,
         )
+
+        # Clean up legacy/deprecated fields from YAML
+        rotation_section.pop("strategy", None)
+        rotation_section.pop("randomize_group_order", None)
+        rotation_section.pop("collection_selection", None)
 
         data["rotation"] = rotation_section
         save_config_mapping(data)

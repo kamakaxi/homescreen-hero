@@ -22,12 +22,16 @@ from homescreen_hero.web.routers import (
     logs_router,
     rotation_router,
     collections_router,
+    collection_io_router,
     auth_router,
     analytics_router,
     integrations_router,
     tools_router,
     seerr_router,
     version_router,
+    library_stats_router,
+    user_targeting_router,
+    poster_backup_router,
 )
 from homescreen_hero.web.routers.version import get_current_version
 from homescreen_hero.web.routers.collections import invalidate_collections_cache
@@ -58,12 +62,16 @@ def create_app() -> FastAPI:
     app.include_router(history_router, prefix="/api")
     app.include_router(logs_router, prefix="/api")
     app.include_router(collections_router, prefix="/api")
+    app.include_router(collection_io_router, prefix="/api")
     app.include_router(auth_router, prefix="/api")
     app.include_router(analytics_router, prefix="/api")
     app.include_router(integrations_router, prefix="/api")
     app.include_router(tools_router, prefix="/api")
     app.include_router(seerr_router, prefix="/api")
     app.include_router(version_router, prefix="/api")
+    app.include_router(library_stats_router, prefix="/api")
+    app.include_router(user_targeting_router, prefix="/api")
+    app.include_router(poster_backup_router, prefix="/api")
 
     # Frontend (serve only if build exists)
     logger.info(
@@ -112,8 +120,17 @@ def create_app() -> FastAPI:
         except Exception as exc:  # pragma: no cover
             logger.exception("Failed to start rotation scheduler: %s", exc)
 
+        # Sync user filter settings for per-user targeting (hsh-hide-{username} labels).
+        try:
+            config = load_config()
+            from homescreen_hero.core.user_targeting import sync_all_user_filters
+            sync_all_user_filters(config)
+            logger.info("User targeting filters synced on startup")
+        except Exception as exc:
+            logger.warning("Failed to sync user targeting filters on startup: %s", exc)
+
     @app.on_event("shutdown")
-    async def _stop_scheduler() -> None:  # pragma: no cover
+    async def _stop_scheduler() -> None:
         stop_rotation_scheduler()
 
     return app

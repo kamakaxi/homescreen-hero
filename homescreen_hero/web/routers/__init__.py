@@ -11,19 +11,27 @@ from .auth import router as auth_router
 from .analytics import router as analytics_router
 from .tools import router as tools_router
 from .seerr import router as seerr_router
+from .collection_io import router as collection_io_router
 from .version import router as version_router
+from .library_stats import router as library_stats_router
+from .user_targeting import router as user_targeting_router
+from .poster_backup import router as poster_backup_router
 
 __all__ = [
     "analytics_router",
     "auth_router",
+    "collection_io_router",
     "collections_router",
     "config_router",
     "health_router",
     "history_router",
     "integrations_router",
+    "library_stats_router",
     "logs_router",
+    "poster_backup_router",
     "rotation_router",
     "seerr_router",
     "tools_router",
+    "user_targeting_router",
     "version_router",
 ]

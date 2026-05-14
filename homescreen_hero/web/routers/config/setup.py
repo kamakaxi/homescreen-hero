@@ -4,12 +4,19 @@ import logging
 import os
 import shutil
 from datetime import datetime
+from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
 from fastapi.responses import Response
+from fastapi.security import HTTPAuthorizationCredentials
 
-from homescreen_hero.core.auth import CurrentUser, get_current_user, require_admin
+from homescreen_hero.core.auth import (
+    CurrentUser,
+    get_current_user,
+    require_admin,
+    security,
+)
 from homescreen_hero.core.config.loader import (
     CONFIG_ENV_VAR,
     get_config_path,
@@ -20,6 +27,7 @@ from homescreen_hero.core.config.loader import (
 )
 from homescreen_hero.core.integrations.trakt_client import TraktClient, TraktConfig
 from homescreen_hero.core.integrations.mdblist_client import MDBListClient, MDBListConfig
+from homescreen_hero.core.integrations.tmdb_client import TMDbClient, TMDbConfig
 from homescreen_hero.core.integrations.tautulli_client import TautulliClient, TautulliConfig
 from homescreen_hero.core.integrations.seerr_client import SeerrClient, SeerrConfig
 from homescreen_hero.core.scheduler import update_rotation_schedule
@@ -33,11 +41,13 @@ from .schemas import (
     ConfigImportResponse,
     BackupStatusResponse,
     EnvVarsResponse,
+    PlexTestRequest,
     TraktTestRequest,
     MDBListTestRequest,
     TautulliTestRequest,
     SeerrTestRequest,
     MALTestRequest,
+    TMDbTestRequest,
     ConnectionTestResponse,
     QuickStartRequest,
 )
@@ -45,6 +55,46 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _config_file_is_parseable(path: Path | None = None) -> bool:
+    config_path = path or get_config_path()
+    if not config_path.exists():
+        return False
+
+    try:
+        content = config_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(content)
+    except Exception:
+        return False
+
+    return isinstance(data, dict)
+
+
+def _is_initial_setup_open() -> bool:
+    # Initial setup/recovery stays available until a parseable config file exists.
+    return not _config_file_is_parseable()
+
+
+def require_initial_setup_open() -> None:
+    # Quick start is a one-time bootstrap path and must never reopen automatically.
+    if not _is_initial_setup_open():
+        raise HTTPException(
+            status_code=403,
+            detail="Initial setup has already been completed. Use the settings page to update configuration.",
+        )
+
+
+async def require_initial_setup_or_admin(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> CurrentUser | None:
+    # During first-run setup, allow helper endpoints without auth.
+    # Once a config exists, require normal admin access.
+    if _is_initial_setup_open():
+        return None
+
+    current_user = await get_current_user(credentials)
+    return await require_admin(current_user)
 
 
 # ========================================================================
@@ -257,20 +307,11 @@ def revert_config(
 
 @router.get("/exists", response_model=ConfigExistsResponse)
 def check_config_exists() -> ConfigExistsResponse:
-    # Check if config file exists and is minimally configured.
+    # Check whether the app has a parseable config file ready for normal startup.
     try:
         config_path = get_config_path()
         exists = config_path.exists()
-
-        is_configured = False
-        if exists:
-            try:
-                config = load_config()
-                # Consider it configured if it has a Plex URL
-                is_configured = bool(config.plex.base_url)
-            except Exception:
-                # Config exists but is invalid
-                is_configured = False
+        is_configured = exists and _config_file_is_parseable(config_path)
 
         return ConfigExistsResponse(
             exists=exists,
@@ -282,15 +323,20 @@ def check_config_exists() -> ConfigExistsResponse:
 
 
 @router.get("/env-vars", response_model=EnvVarsResponse)
-def check_env_vars() -> EnvVarsResponse:
+def check_env_vars(
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> EnvVarsResponse:
     # Check which configuration values are provided via environment variables.
+    plex_url = os.getenv("HSH_PLEX_URL")
     return EnvVarsResponse(
         plex_token_from_env=bool(os.getenv("HSH_PLEX_TOKEN")),
-        plex_url_from_env=bool(os.getenv("HSH_PLEX_URL")),
+        plex_url_from_env=bool(plex_url),
+        plex_url_value=plex_url if plex_url else None,
         auth_password_from_env=bool(os.getenv("HSH_AUTH_PASSWORD")),
         auth_secret_from_env=bool(os.getenv("HSH_AUTH_SECRET_KEY")),
         trakt_client_id_from_env=bool(os.getenv("HSH_TRAKT_CLIENT_ID")),
         mdblist_api_key_from_env=bool(os.getenv("HSH_MDBLIST_API_KEY")),
+        tmdb_api_key_from_env=bool(os.getenv("HSH_TMDB_API_KEY")),
         tautulli_api_key_from_env=bool(os.getenv("HSH_TAUTULLI_API_KEY")),
         tautulli_url_from_env=bool(os.getenv("HSH_TAUTULLI_BASE_URL")),
         seerr_api_key_from_env=bool(os.getenv("HSH_SEERR_API_KEY")),
@@ -303,8 +349,38 @@ def check_env_vars() -> EnvVarsResponse:
 # CONNECTION TESTS
 # ========================================================================
 
+@router.post("/test-plex", response_model=ConnectionTestResponse)
+def test_plex_connection(
+    payload: PlexTestRequest,
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> ConnectionTestResponse:
+    # Test Plex connection and return available libraries without writing config.
+    try:
+        from plexapi.server import PlexServer
+        from homescreen_hero.core.integrations.plex_client import _make_session
+
+        plex_url = payload.plex_url or os.getenv("HSH_PLEX_URL")
+        plex_token = payload.plex_token or os.getenv("HSH_PLEX_TOKEN")
+        if not plex_url or not plex_token:
+            return ConnectionTestResponse(ok=False, error="Plex URL and token are required")
+
+        server = PlexServer(plex_url, plex_token, session=_make_session(), timeout=10)
+        libraries = [
+            {"title": section.title, "type": section.type}
+            for section in server.library.sections()
+            if section.type != "artist"
+        ]
+        return ConnectionTestResponse(ok=True, libraries=libraries)
+    except Exception as exc:
+        logger.exception("Plex connection test failed")
+        return ConnectionTestResponse(ok=False, error=str(exc))
+
+
 @router.post("/test-trakt", response_model=ConnectionTestResponse)
-def test_trakt_connection(payload: TraktTestRequest) -> ConnectionTestResponse:
+def test_trakt_connection(
+    payload: TraktTestRequest,
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> ConnectionTestResponse:
     # Test Trakt connection with provided credentials (for quick-start wizard).
     try:
         # Use provided client_id or fall back to environment variable
@@ -312,10 +388,7 @@ def test_trakt_connection(payload: TraktTestRequest) -> ConnectionTestResponse:
         if not client_id:
             return ConnectionTestResponse(ok=False, error="No Trakt Client ID provided")
 
-        cfg = TraktConfig(
-            client_id=client_id,
-            base_url=payload.base_url,
-        )
+        cfg = TraktConfig(client_id=client_id)
         client = TraktClient(cfg)
         ok, error = client.ping()
         return ConnectionTestResponse(ok=ok, error=error)
@@ -325,7 +398,10 @@ def test_trakt_connection(payload: TraktTestRequest) -> ConnectionTestResponse:
 
 
 @router.post("/test-mdblist", response_model=ConnectionTestResponse)
-def test_mdblist_connection(payload: MDBListTestRequest) -> ConnectionTestResponse:
+def test_mdblist_connection(
+    payload: MDBListTestRequest,
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> ConnectionTestResponse:
     # Test MDBList connection with provided credentials (for quick-start wizard).
     try:
         # Use provided api_key or fall back to environment variable
@@ -333,10 +409,7 @@ def test_mdblist_connection(payload: MDBListTestRequest) -> ConnectionTestRespon
         if not api_key:
             return ConnectionTestResponse(ok=False, error="No MDBList API Key provided")
 
-        cfg = MDBListConfig(
-            api_key=api_key,
-            base_url=payload.base_url,
-        )
+        cfg = MDBListConfig(api_key=api_key)
         client = MDBListClient(cfg)
         ok, error = client.ping()
         return ConnectionTestResponse(ok=ok, error=error)
@@ -346,12 +419,17 @@ def test_mdblist_connection(payload: MDBListTestRequest) -> ConnectionTestRespon
 
 
 @router.post("/test-tautulli", response_model=ConnectionTestResponse)
-def test_tautulli_connection(payload: TautulliTestRequest) -> ConnectionTestResponse:
+def test_tautulli_connection(
+    payload: TautulliTestRequest,
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> ConnectionTestResponse:
     # Test Tautulli connection with provided credentials (for quick-start wizard).
     try:
-        # Use provided values or fall back to environment variables
-        api_key = payload.api_key or os.getenv("HSH_TAUTULLI_API_KEY")
-        base_url = payload.base_url or os.getenv("HSH_TAUTULLI_BASE_URL", "http://localhost:8181")
+        api_key = payload.api_key
+        base_url = payload.base_url
+        if not api_key:
+            api_key = os.getenv("HSH_TAUTULLI_API_KEY")
+            base_url = os.getenv("HSH_TAUTULLI_BASE_URL", "http://localhost:8181")
         if not api_key:
             return ConnectionTestResponse(ok=False, error="No Tautulli API Key provided")
 
@@ -368,12 +446,17 @@ def test_tautulli_connection(payload: TautulliTestRequest) -> ConnectionTestResp
 
 
 @router.post("/test-seerr", response_model=ConnectionTestResponse)
-def test_seerr_connection(payload: SeerrTestRequest) -> ConnectionTestResponse:
+def test_seerr_connection(
+    payload: SeerrTestRequest,
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> ConnectionTestResponse:
     # Test Seerr connection with provided credentials (for quick-start wizard).
     try:
-        # Use provided values or fall back to environment variables
-        api_key = payload.api_key or os.getenv("HSH_SEERR_API_KEY")
-        base_url = payload.base_url or os.getenv("HSH_SEERR_BASE_URL", "http://localhost:5055")
+        api_key = payload.api_key
+        base_url = payload.base_url
+        if not api_key:
+            api_key = os.getenv("HSH_SEERR_API_KEY")
+            base_url = os.getenv("HSH_SEERR_BASE_URL", "http://localhost:5055")
         if not api_key:
             return ConnectionTestResponse(ok=False, error="No Seerr API Key provided")
 
@@ -390,7 +473,10 @@ def test_seerr_connection(payload: SeerrTestRequest) -> ConnectionTestResponse:
 
 
 @router.post("/test-mal", response_model=ConnectionTestResponse)
-def test_mal_connection(payload: MALTestRequest) -> ConnectionTestResponse:
+def test_mal_connection(
+    payload: MALTestRequest,
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> ConnectionTestResponse:
     # Test MAL connection with provided credentials (for quick-start wizard).
     try:
         from homescreen_hero.core.integrations.mal_client import MALClient, MALConfig
@@ -409,33 +495,50 @@ def test_mal_connection(payload: MALTestRequest) -> ConnectionTestResponse:
         return ConnectionTestResponse(ok=False, error=str(exc))
 
 
+@router.post("/test-tmdb", response_model=ConnectionTestResponse)
+def test_tmdb_connection(
+    payload: TMDbTestRequest,
+    _current_user: CurrentUser | None = Depends(require_initial_setup_or_admin),
+) -> ConnectionTestResponse:
+    # Test TMDb connection with provided credentials.
+    try:
+        api_key = payload.api_key or os.getenv("HSH_TMDB_API_KEY")
+        if not api_key:
+            return ConnectionTestResponse(ok=False, error="No TMDb API Key provided")
+
+        cfg = TMDbConfig(api_key=api_key)
+        client = TMDbClient(cfg)
+        ok, error = client.ping()
+        return ConnectionTestResponse(ok=ok, error=error)
+    except Exception as exc:
+        logger.exception("TMDb connection test failed")
+        return ConnectionTestResponse(ok=False, error=str(exc))
+
+
 # ========================================================================
 # QUICK START WIZARD
 # ========================================================================
 
 @router.post("/quick-start", response_model=ConfigSaveResponse)
-def quick_start_setup(payload: QuickStartRequest) -> ConfigSaveResponse:
+def quick_start_setup(
+    payload: QuickStartRequest,
+    _initial_setup: None = Depends(require_initial_setup_open),
+) -> ConfigSaveResponse:
     # Initialize config.yaml with minimal Plex and optional Trakt settings.
     try:
-        # SECURITY: Only allow quick-start if auth is not configured
-        # This prevents unauthorized overwrites while allowing the wizard to work
-        config_status = check_config_exists()
-        if config_status.is_configured:
-            try:
-                config = load_config()
-                # If auth is enabled, reject — covers password, plex, and both modes
-                if config.auth and config.auth.enabled:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Configuration is protected. Use the settings page to modify configuration."
-                    )
-            except HTTPException:
-                raise
-            except Exception:
-                # If we can't load config, allow the setup to proceed
-                pass
-
+        # Initial setup lockout is enforced by the dependency above.
+        # If a broken config exists, preserve it before overwriting during recovery.
         config_path = get_config_path()
+        if config_path.exists() and not _config_file_is_parseable(config_path):
+            backup_path = config_path.with_suffix(".yaml.bak")
+            try:
+                shutil.copy2(config_path, backup_path)
+                logger.info("Backed up invalid config to %s before quick-start recovery", backup_path)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to create backup before recovery: {exc}",
+                ) from exc
 
         # Use environment variables if payload values are empty
         plex_url = payload.plex_url or os.getenv("HSH_PLEX_URL", "")
@@ -446,18 +549,30 @@ def quick_start_setup(payload: QuickStartRequest) -> ConfigSaveResponse:
         # Convert library names to library config objects
         libraries_config = [{"name": lib, "enabled": True} for lib in payload.libraries]
 
+        # Build rotation config with optional auto-rotate
+        rotation_config = {
+            "enabled": payload.rotation_enabled,
+            "interval_hours": payload.rotation_interval_hours,
+            "max_collections": payload.rotation_max_collections,
+            "strategy": payload.rotation_strategy,
+            "allow_repeats": payload.rotation_allow_repeats,
+        }
+
+        if payload.rotation_mode == "auto_rotate":
+            rotation_config["auto_rotate"] = {
+                "enabled": True,
+                "libraries": payload.libraries,
+                "visibility_home": payload.visibility_home,
+                "visibility_shared": payload.visibility_shared,
+                "visibility_recommended": payload.visibility_recommended,
+            }
+
         minimal_config = {
             "plex": {
                 "base_url": plex_url,
                 "libraries": libraries_config
             },
-            "rotation": {
-                "enabled": payload.rotation_enabled,
-                "interval_hours": payload.rotation_interval_hours,
-                "max_collections": payload.rotation_max_collections,
-                "strategy": payload.rotation_strategy,
-                "allow_repeats": payload.rotation_allow_repeats
-            },
+            "rotation": rotation_config,
             "logging": {
                 "level": "INFO"
             },
@@ -468,125 +583,32 @@ def quick_start_setup(payload: QuickStartRequest) -> ConfigSaveResponse:
         if not plex_token_from_env:
             minimal_config["plex"]["token"] = plex_token
 
-        # Add Trakt if enabled
-        # Use environment variable if payload value is empty
-        trakt_client_id = payload.trakt_client_id or os.getenv("HSH_TRAKT_CLIENT_ID", "")
-        trakt_client_id_from_env = os.getenv("HSH_TRAKT_CLIENT_ID")
-
-        if payload.trakt_enabled and trakt_client_id:
-            minimal_config["trakt"] = {
-                "enabled": True,
-                "base_url": payload.trakt_base_url,
-                "sources": []
-            }
-            # Only write client_id to config if not from environment variable
-            if not trakt_client_id_from_env:
-                minimal_config["trakt"]["client_id"] = trakt_client_id
-        else:
-            minimal_config["trakt"] = {
-                "enabled": False,
-                "base_url": payload.trakt_base_url,
-                "sources": []
-            }
-
-        # Add MDBList if enabled
-        # Use environment variable if payload value is empty
-        mdblist_api_key = payload.mdblist_api_key or os.getenv("HSH_MDBLIST_API_KEY", "")
-        mdblist_api_key_from_env = os.getenv("HSH_MDBLIST_API_KEY")
-
-        if payload.mdblist_enabled and mdblist_api_key:
-            minimal_config["mdblist"] = {
-                "enabled": True,
-                "base_url": payload.mdblist_base_url,
-                "sources": []
-            }
-            # Only write api_key to config if not from environment variable
-            if not mdblist_api_key_from_env:
-                minimal_config["mdblist"]["api_key"] = mdblist_api_key
-        else:
-            minimal_config["mdblist"] = {
-                "enabled": False,
-                "base_url": payload.mdblist_base_url,
-                "sources": []
-            }
-
-        # Add Tautulli if enabled
-        # Use environment variables if payload values are empty
-        tautulli_api_key = payload.tautulli_api_key or os.getenv("HSH_TAUTULLI_API_KEY", "")
-        tautulli_api_key_from_env = os.getenv("HSH_TAUTULLI_API_KEY")
-        tautulli_base_url = payload.tautulli_base_url or os.getenv("HSH_TAUTULLI_BASE_URL", "http://localhost:8181")
-        tautulli_url_from_env = os.getenv("HSH_TAUTULLI_BASE_URL")
-
-        if payload.tautulli_enabled and tautulli_api_key:
-            minimal_config["tautulli"] = {
-                "enabled": True,
-                "collect_on_rotation": True,
-                "collect_interval_hours": 24,
-            }
-            # Only write api_key to config if not from environment variable
-            if not tautulli_api_key_from_env:
-                minimal_config["tautulli"]["api_key"] = tautulli_api_key
-            # Only write base_url to config if not from environment variable
-            if not tautulli_url_from_env:
-                minimal_config["tautulli"]["base_url"] = tautulli_base_url
-        else:
-            minimal_config["tautulli"] = {
-                "enabled": False,
-                "base_url": tautulli_base_url,
-                "collect_on_rotation": True,
-                "collect_interval_hours": 24,
-            }
-
-        # Add Seerr if enabled
-        # Use environment variables if payload values are empty
-        seerr_api_key = payload.seerr_api_key or os.getenv("HSH_SEERR_API_KEY", "")
-        seerr_api_key_from_env = os.getenv("HSH_SEERR_API_KEY")
-        seerr_base_url = payload.seerr_base_url or os.getenv("HSH_SEERR_BASE_URL", "http://localhost:5055")
-        seerr_url_from_env = os.getenv("HSH_SEERR_BASE_URL")
-
-        if payload.seerr_enabled and seerr_api_key:
-            minimal_config["seerr"] = {
-                "enabled": True,
-            }
-            # Only write api_key to config if not from environment variable
-            if not seerr_api_key_from_env:
-                minimal_config["seerr"]["api_key"] = seerr_api_key
-            # Only write base_url to config if not from environment variable
-            if not seerr_url_from_env:
-                minimal_config["seerr"]["base_url"] = seerr_base_url
-        else:
-            minimal_config["seerr"] = {
-                "enabled": False,
-                "base_url": seerr_base_url,
-            }
-
-        # Add auth configuration
-        # Check if password is provided via env var or payload
+        # Auth is always required for new setups
+        needs_password = payload.auth_method in ("password", "both")
         password_from_env = os.getenv("HSH_AUTH_PASSWORD")
         auth_password = payload.auth_password or password_from_env
+        secret_from_env = os.getenv("HSH_AUTH_SECRET_KEY")
 
-        if payload.auth_enabled and payload.auth_username and auth_password:
-            secret_from_env = os.getenv("HSH_AUTH_SECRET_KEY")
+        # Validate that required auth credentials are provided
+        if needs_password and not (payload.auth_username and auth_password):
+            raise HTTPException(
+                status_code=400,
+                detail="Username and password are required for password authentication."
+            )
 
-            minimal_config["auth"] = {
-                "enabled": True,
-                "username": payload.auth_username,
-                "token_expire_days": 30
-            }
+        minimal_config["auth"] = {
+            "enabled": True,
+            "method": payload.auth_method,
+            "username": payload.auth_username or "admin",
+            "token_expire_days": 30,
+        }
 
-            # Only write to config if not using env vars
-            if not password_from_env:
-                minimal_config["auth"]["password"] = payload.auth_password
-            if not secret_from_env:
-                # Generate a random secret key
-                import secrets
-                minimal_config["auth"]["secret_key"] = secrets.token_urlsafe(32)
-        else:
-            minimal_config["auth"] = {
-                "enabled": False,
-                "username": "admin",
-                "token_expire_days": 30
-            }
+        # Only write password/secret to config if not using env vars
+        if needs_password and not password_from_env:
+            minimal_config["auth"]["password"] = payload.auth_password
+        if not secret_from_env:
+            import secrets
+            minimal_config["auth"]["secret_key"] = secrets.token_urlsafe(32)
 
         # Serialize and save
         serialized = yaml.safe_dump(minimal_config, sort_keys=False)

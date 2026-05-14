@@ -9,7 +9,7 @@ const buttonVariants = cva(
     {
         variants: {
             variant: {
-                default: "bg-primary text-white hover:bg-blue-600",
+                default: "bg-primary text-white hover:bg-primary-hover",
                 destructive: "bg-red-600 text-white hover:bg-red-700",
                 outline: "border border-slate-700 bg-transparent text-slate-300 hover:bg-slate-800",
                 secondary: "bg-slate-800 text-white hover:bg-slate-700",
@@ -50,4 +50,5 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 );
 Button.displayName = "Button";
 
+// eslint-disable-next-line react-refresh/only-export-components
 export { Button, buttonVariants };

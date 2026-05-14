@@ -2,6 +2,62 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ===== Accent theme tokens ===== */
+:root {
+    --color-primary: 25 93 230;
+    --color-primary-hover: 37 99 235;
+    --color-bg-dark: 17 22 33;
+    --color-card-dark: 26 31 46;
+    --color-card-hover: 34 40 56;
+    --color-slate-950: 2 6 23;
+    --color-slate-900: 15 23 42;
+    --color-slate-800: 30 41 59;
+}
+
+:root[data-accent="plex-orange"] {
+    --color-primary: 229 160 13;
+    --color-primary-hover: 204 124 25;
+    --color-bg-dark: 22 19 17;
+    --color-card-dark: 22 27 33;
+    --color-card-hover: 28 34 41;
+    --color-slate-950: 10 8 7;
+    --color-slate-900: 30 30 30;
+    --color-slate-800: 50 50 50;
+}
+
+/* ===== Plex Theme: Flat Card Style ===== */
+:root[data-accent="plex-orange"] .bg-gradient-to-br:not(.preserve-gradient) {
+    background-image: none !important;
+    background-color: #161b21 !important;
+}
+
+:root[data-accent="plex-orange"] .hover\:bg-slate-800\/30:hover {
+    background-color: #1e242b !important;
+}
+
+:root[data-accent="plex-orange"] .shadow-lg,
+:root[data-accent="plex-orange"] .shadow-md {
+    box-shadow: none !important;
+}
+
+:root[data-accent="plex-orange"] .bg-gradient-to-br,
+:root[data-accent="plex-orange"] .bg-card-dark {
+    border-color: #252d36 !important;
+}
+
+/* ===== Wizard slide transitions ===== */
+@keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(40px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+@keyframes slide-in-left {
+    from { opacity: 0; transform: translateX(-40px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+.wizard-slide { will-change: transform, opacity; }
+.wizard-slide-in-right { animation: slide-in-right 0.35s ease-out; }
+.wizard-slide-in-left { animation: slide-in-left 0.35s ease-out; }
+
 /* ===== Custom dark scrollbar ===== */
 .scrollbar-thin {
     scrollbar-width: thin;
@@ -50,12 +106,12 @@
     background-color: transparent;
     /* Hidden by default */
     border-radius: 9999px;
-    transition: background-color 0.2s;
 }
 
 .scrollbar-hover-only:hover::-webkit-scrollbar-thumb {
     background-color: rgba(148, 163, 184, .35);
     /* Visible on hover */
+    transition: background-color 0.2s;
 }
 
 .scrollbar-hover-only::-webkit-scrollbar-thumb:hover {
@@ -219,14 +275,14 @@ select option {
 
 .hsh-datepicker .react-datepicker__day--selected,
 .hsh-datepicker .react-datepicker__day--keyboard-selected {
-    background-color: #3b82f6 !important;
+    background-color: rgb(var(--color-primary)) !important;
     color: #ffffff !important;
     font-weight: 500 !important;
 }
 
 .hsh-datepicker .react-datepicker__day--selected:hover,
 .hsh-datepicker .react-datepicker__day--keyboard-selected:hover {
-    background-color: #2563eb !important;
+    background-color: rgb(var(--color-primary-hover)) !important;
 }
 
 .hsh-datepicker .react-datepicker__day--today {
@@ -302,4 +358,110 @@ select option {
 
 .edit-mode-widget:hover {
     animation: none;
+}
+
+/* ===== Rule Card Animations ===== */
+@keyframes rule-card-in {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.rule-card-enter {
+    animation: rule-card-in 0.2s ease-out;
+}
+
+.rule-card-exit {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+    transition: all 0.2s ease-out;
+}
+
+/* ===== Preview Poster Animations ===== */
+@keyframes poster-enter {
+    from {
+        opacity: 0;
+        transform: scale(0.92);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.preview-poster-enter {
+    animation: poster-enter 0.35s ease-out both;
+}
+
+/* ===== Group Detail Page Animations ===== */
+
+/* Staggered entrance for grid items */
+@keyframes grid-item-in {
+    from {
+        opacity: 0;
+        transform: translateY(12px) scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.grid-item-enter {
+    animation: grid-item-in 0.35s ease-out both;
+}
+
+/* Fade out when a poster is clicked to add */
+@keyframes grid-item-out {
+    from {
+        opacity: 1;
+        transform: scale(1);
+    }
+    to {
+        opacity: 0;
+        transform: scale(0.9);
+    }
+}
+
+.grid-item-exit {
+    animation: grid-item-out 0.25s ease-in both;
+    pointer-events: none;
+}
+
+/* Sidebar list item slide in */
+@keyframes sidebar-item-in {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.sidebar-item-enter {
+    animation: sidebar-item-in 0.3s ease-out both;
+}
+
+/* Sidebar list item fade out */
+@keyframes sidebar-item-out {
+    from {
+        opacity: 1;
+        transform: scale(1);
+    }
+    to {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+}
+
+.sidebar-item-exit {
+    animation: sidebar-item-out 0.2s ease-in both;
+    pointer-events: none;
 }
